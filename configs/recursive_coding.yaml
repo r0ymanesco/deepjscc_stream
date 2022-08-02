@@ -1,0 +1,40 @@
+loss: 'l2'
+train_epochs: 200
+save_dir: 'checkpoints/recursive_coding'
+
+dataset:
+  dataset: 'ucf101'
+  path: '/home/tt2114/datasets/UCF101'
+  frames_per_clip: 25
+  train_batch_size: 2
+  eval_batch_size: 2
+
+optimizer:
+  solver: 'adam'
+  lr: 0.0001
+
+scheduler:
+  scheduler: 'mult_lr'
+  lr_schedule_factor: 0.8
+
+encoder:
+  c_in: 3
+  c_feat: 256
+  c_out: 64
+  tf_layers: 8
+  tf_heads: 1
+  tf_ff: 256
+  max_seq_len: 20
+
+modem:
+  modem: 'continuous'
+
+channel:
+  model: 'awgn'
+  train_snr: [10.0]
+  eval_snr: [10.0]
+
+early_stop:
+  mode: 'min'
+  delta: 0.0
+  patience: 10
