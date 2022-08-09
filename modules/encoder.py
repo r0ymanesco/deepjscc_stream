@@ -5,8 +5,15 @@ import torch
 import torch.nn as nn
 
 from modules.transformer import TFEncoder
-from modules.transformer2d import TFEncoder2D
+from modules.transformer2d import TFEncoder2D, TFDecoder2D
 from modules.feature_encoder import FeatureEncoder, FeatureDecoder
+
+
+def get_mask(q_len, k_len, n_heads, feat_dims):
+    idxs = torch.tril_indices(q_len, k_len)
+    mask = torch.zeros(1, q_len, k_len, n_heads, *feat_dims)
+    mask[:, idxs[0], idxs[1]] = 1.
+    return mask
 
 
 class TFRecursiveEncoder(nn.Module):
@@ -27,38 +34,52 @@ class TFRecursiveEncoder(nn.Module):
         self.key_feature_encoder = FeatureEncoder(c_in, c_feat, c_out, reduced)
         self.int_feature_encoder = FeatureEncoder(c_in, c_feat, c_out, reduced)
 
-        # d_feat = np.prod(feat_dims)
-        # self.tf_encoder = TFEncoder(d_feat, tf_layers, tf_heads, tf_ff, max_seq_len, tf_dropout)
-        self.tf_encoder = TFEncoder2D(c_out*2, tf_layers, tf_heads, tf_ff, tf_dropout,
+        self.tf_encoder = TFEncoder2D(c_out, tf_layers, tf_heads, tf_ff, tf_dropout,
                                       feat_dims, c_feat, max_seq_len)
-        # self.tf_decoder = TFDecoder(d_feat, tf_layers, tf_heads, tf_ff, tf_dropout)
+        self.tf_decoder = TFDecoder2D(c_out, tf_layers, tf_heads, tf_ff, tf_dropout,
+                                      feat_dims, c_feat, max_seq_len)
+
+    def _keyframe_train(self, frames):
+        pass
+
+    def _joint_training(self, frames):
+        pass
 
     def forward(self, gop):
         key_frame = gop[0]
         int_frames = gop[1:]
+        B = key_frame.size(0)
 
         z_0 = self.key_feature_encoder(key_frame)
-        seq_list = [z_0]
+        seq_list = [z_0] + [None] * len(int_frames)
 
-        for i, frame in enumerate(int_frames):
-            z = self.int_feature_encoder(frame)
-            z_prev = seq_list[i]
-            seq_list[i] = torch.cat((z_prev, z), dim=1)
+        batch_int_frames = torch.cat(int_frames, dim=0)
+        batch_z_int = self.int_feature_encoder(batch_int_frames)
+        batch_z_int = torch.chunk(batch_z_int, chunks=len(int_frames), dim=0)
 
-            tf_input = torch.stack(seq_list, dim=1)
-            mask = torch.tril(torch.ones(i+1, i+1, device=z.device))
-            # NOTE mask does nothing in TF2D
-            tf_output = self.tf_encoder(tf_input, mask)
-            z_next = torch.chunk(tf_output, chunks=i+1, dim=1)[-1]  # NOTE: entropy est this val
-            z_next = torch.chunk(z_next, chunks=2, dim=2)[-1]
-            seq_list.append(z_next.squeeze(1))
+        # enc_mask = torch.repeat_interleave(
+        #     get_mask(len(int_frames), len(int_frames), self.tf_heads, self.feat_dims[1:]), B, dim=0)
+        enc_input = torch.stack(batch_z_int, dim=1)
+        enc_output = self.tf_encoder(enc_input, None)# enc_mask.to(enc_input.device))
+
+        for i in range(len(int_frames)):
+            # trg_mask = torch.repeat_interleave(
+            #     get_mask(i+1, i+1, self.tf_heads, self.feat_dims[1:]), B, dim=0)
+            # src_mask = torch.repeat_interleave(
+            #     get_mask(i+1, len(int_frames), self.tf_heads, self.feat_dims[1:]), B, dim=0)
+            target = torch.stack(seq_list[:i+1], dim=1)
+            tf_output = self.tf_decoder(target, enc_output,
+                                        src_mask=None, #src_mask.to(enc_output.device),
+                                        trg_mask=None) #trg_mask.to(tf_input.device))
+            z_next = torch.chunk(tf_output, chunks=i+1, dim=1)[-1]
+            seq_list[i+1] = z_next.squeeze(1)
 
         z_int = seq_list[-1]
+        assert None not in seq_list
         return (z_0, z_int), {}
 
     def __str__(self):
-        return f'TFRecursiveEncoder({self.c_in},{self.c_feat},\
-        {self.tf_layers},{self.tf_heads},{self.tf_ff},{self.tf_dropout})'
+        return f'TFRecursiveEncoder({self.c_in},{self.c_feat},{self.tf_layers},{self.tf_heads},{self.tf_ff},{self.tf_dropout})'
 
 
 class TFRecursiveDecoder(nn.Module):
@@ -79,41 +100,56 @@ class TFRecursiveDecoder(nn.Module):
         self.int_feature_decoder = FeatureDecoder(c_out, c_feat, c_in, reduced)
         self.auto_feature_encoder = FeatureEncoder(c_in, c_feat, c_out, reduced)
 
-        # d_feat = np.prod(feat_dims)
-        # self.tf_encoder = TFEncoder(d_feat, tf_layers, tf_heads, tf_ff, max_seq_len, tf_dropout)
-        self.tf_encoder = TFEncoder2D(c_out*2, tf_layers, tf_heads, tf_ff, tf_dropout,
+        self.tf_encoder = TFEncoder2D(c_out, tf_layers, tf_heads, tf_ff, tf_dropout,
                                       feat_dims, c_feat, max_seq_len)
-        # self.tf_decoder = TFDecoder(d_feat, tf_layers, tf_heads, tf_ff, tf_dropout)
+        self.tf_decoder = TFDecoder2D(c_out, tf_layers, tf_heads, tf_ff, tf_dropout,
+                                      feat_dims, c_feat, max_seq_len)
 
+    def _keyframe_train(self, codes):
+        pass
+
+    def _joint_training(self, codes):
+        pass
+
+    # @torch.jit.script
     def forward(self, codes, gop_len):
-        gop = []
         z_0, z_int = codes
+        gop = [None] * gop_len
 
         B = z_0.size(0)
         z_0 = z_0.view((B, *self.feat_dims))
         z_int = z_int.view((B, *self.feat_dims))
-        seq_list = [z_int]
 
         key_frame = self.key_feature_decoder(z_0)
-        gop.append(key_frame)
+        gop[0] = torch.sigmoid(key_frame)
 
+        seq_list = [None] * (gop_len-1)
+        trg_list = [z_int] + [None] * (gop_len-1)
         for i in range(gop_len-1):
-            z_prev = seq_list[i]
             z_bar = self.auto_feature_encoder(gop[i])
-            seq_list[i] = torch.cat((z_prev, z_bar), dim=1)
+            seq_list[i] = z_bar
+            seq_input = torch.stack(seq_list[:i+1], dim=1)
+            # seq_mask = torch.repeat_interleave(
+            #     get_mask(len(seq_list), len(seq_list), self.tf_heads, self.feat_dims[1:]), B, dim=0)
+            enc_output = self.tf_encoder(seq_input, None) # seq_mask.to(seq_input.device))
 
-            tf_input = torch.stack(seq_list, dim=1)
-            mask = torch.tril(torch.ones(i+1, i+1, device=z_0.device))
-            tf_output = self.tf_encoder(tf_input, mask)
+            target = torch.stack(trg_list[:i+1], dim=1)
+            # trg_mask = torch.repeat_interleave(
+            #     get_mask(len(trg_list), len(trg_list), self.tf_heads, self.feat_dims[1:]), B, dim=0)
+
+            tf_output = self.tf_decoder(target, enc_output,
+                                        src_mask=None, #seq_mask.to(enc_output.device),
+                                        trg_mask=None) #trg_mask.to(target.device))
             z_next = torch.chunk(tf_output, chunks=i+1, dim=1)[-1]
-            z_next = torch.chunk(z_next, chunks=2, dim=2)[-1]
-            seq_list.append(z_next.squeeze(1))
+            trg_list[i+1] = z_next.squeeze(1)
 
             frame = self.int_feature_decoder(z_next.squeeze(1))
-            gop.append(frame)
+            gop[i+1] = torch.sigmoid(frame)
 
+        assert None not in gop
+        assert None not in seq_list
+        assert None not in trg_list
         return gop, {}
 
     def __str__(self):
-        return f'TFRecursiveDecoder({self.c_in},{self.c_feat},\
-        {self.tf_layers},{self.tf_heads},{self.tf_ff},{self.tf_dropout})'
+        return f'TFRecursiveDecoder({self.c_in},{self.c_feat},{self.tf_layers},{self.tf_heads},{self.tf_ff},{self.tf_dropout})'

@@ -16,51 +16,34 @@ class MultiHeadAttention2D(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.d_k = c_in // n_heads
 
-        # self.q_conv = ResidualBlock(in_ch=c_in, out_ch=c_in)
-        # self.v_conv = ResidualBlock(in_ch=c_in, out_ch=c_in)
-        # self.k_conv = ResidualBlock(in_ch=c_in, out_ch=c_in)
-
         self.q_conv = nn.Conv2d(in_channels=c_in, out_channels=c_in, kernel_size=1, stride=1)
         self.k_conv = nn.Conv2d(in_channels=c_in, out_channels=c_in, kernel_size=1, stride=1)
         self.v_conv = nn.Conv2d(in_channels=c_in, out_channels=c_in, kernel_size=1, stride=1)
 
-        # self.att_net = ResidualBlock(in_ch=c_in, out_ch=n_heads)
         self.att_net = nn.Sequential(
             AttentionBlock(c_in),
             ResidualBlock(in_ch=c_in, out_ch=n_heads)
         )
         self.out = nn.Conv2d(in_channels=c_in, out_channels=c_in, kernel_size=1, stride=1)
 
-    def attention(self, q, k, v, mask=None, dropout=None):
+    def attention(self, q, k, v, mask=None):
         bs, q_seq_len, k_seq_len, c, h, w = q.size()
 
-        att_input = (q * k).view(bs*q_seq_len*k_seq_len, c, h, w)
+        att_input = (q + k).view(bs*q_seq_len*k_seq_len, c, h, w)
         scores = self.att_net(att_input) / math.sqrt(self.d_k)
         scores = scores.view(bs, q_seq_len, k_seq_len, self.n_heads, h, w)
-
         scores = scores.transpose(2, 3)
+
+        if mask is not None:
+            mask = mask.transpose(2, 3)
+            scores = scores.masked_fill(mask == 0, float('-inf'))
+
         scores = F.softmax(scores, dim=3).unsqueeze(4)
         # repeat to get dims (bs, q_seq_len, n_heads, k_seq_len, c//n_heads, h, w)
         scores = torch.repeat_interleave(scores, c//self.n_heads, dim=4)
 
         # dims (bs, q_seq_len, n_heads, c//n_heads, h, w)
-        v_out = torch.sum(scores * v, dim=3)
-        # dims (bs* q_seq_len, n_heads, c, h, w)
-        v_out = v_out.view(bs*q_seq_len, c, h, w)
-
-        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(d_k)
-
-        if mask is not None:
-            mask = mask.unsqueeze(1)
-            scores = scores.masked_fill(mask == 0, float('-inf'))
-
-        # scores = F.softmax(scores, dim=-1)
-        scores = torch.sigmoid(scores)
-
-        if dropout is not None:
-            scores = dropout(scores)
-
-        output = torch.matmul(scores, v)
+        output = torch.sum(scores * v, dim=3)
         return output
 
     def forward(self, query, k, v, mask=None):
@@ -100,19 +83,8 @@ class MultiHeadAttention2D(nn.Module):
         # calculate attention
         # scores = self.attention(q, k, v, d_k, mask, self.dropout)
         # dims (bs, q_seq_len, k_seq_len, c, h, w)
-        att_input = (query * k).view(bs*q_seq_len*k_seq_len, c, h, w)
-        # att_input = att_input.view(bs*q_seq_len*k_seq_len, c, h, w)
-        scores = self.att_net(att_input)
-        scores = scores.view(bs, q_seq_len, k_seq_len, self.n_heads, h, w)
-        # transpose to get dims (bs, q_seq_len, n_heads, k_seq_len, h, w)
-        scores = scores.transpose(2, 3)
-        scores = F.softmax(scores, dim=3).unsqueeze(4)
-        # repeat to get dims (bs, q_seq_len, n_heads, k_seq_len, c//n_heads, h, w)
-        scores = torch.repeat_interleave(scores, c//self.n_heads, dim=4)
+        v_out = self.attention(query, k, v, mask)
 
-        # dims (bs, q_seq_len, n_heads, c//n_heads, h, w)
-        v_out = torch.sum(scores * v, dim=3)
-        # dims (bs* q_seq_len, n_heads, c, h, w)
         v_out = v_out.view(bs*q_seq_len, c, h, w)
         # dims (bs, q_seq_len, k_seq_len, c, h, w)
         output = self.out(v_out).view(bs, q_seq_len, c, h, w)
@@ -238,7 +210,7 @@ class DecoderLayer2D(nn.Module):
         x2 = torch.stack(x2, dim=1)
         x = x + self.dropout_1(self.attn_1(x2, x2, x2, trg_mask))
 
-        x2 = torch.chunk(x2, chunks=seq_len, dim=1)
+        x2 = torch.chunk(x, chunks=seq_len, dim=1)
         x2 = torch.cat(x2, dim=0).squeeze(1)
         x2 = self.norm_2(x2)
         x2 = torch.chunk(x2, chunks=seq_len, dim=0)
@@ -279,7 +251,7 @@ class TFEncoder2D(nn.Module):
         # assumes input shape (bs, seq_len, c, h, w)
         seq_len = x.size(1)
 
-        x = self.pe(x)
+        # x = self.pe(x)
 
         # for layer_idx in range(self.n_layers):
         #     x = checkpoint.checkpoint(
@@ -322,7 +294,7 @@ class TFDecoder2D(nn.Module):
         # assumes input shape (bs, seq_len, c, h, w)
         seq_len = x.size(1)
 
-        x = self.pe(x)
+        # x = self.pe(x)
 
         # for layer_idx in range(self.n_layers):
         #     x = checkpoint.checkpoint(

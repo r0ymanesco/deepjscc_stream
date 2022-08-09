@@ -13,7 +13,7 @@ from trainer.base_trainer import BaseTrainer
 from modules.modem import Modem
 from modules.channel import Channel
 from modules.scheduler import EarlyStopping
-from modules.feature_encoder import FeatureEncoder
+from modules.feature_encoder import FeatureEncoder, FeatureDecoder
 from modules.encoder import TFRecursiveEncoder, TFRecursiveDecoder
 
 from utils import calc_loss, calc_msssim, calc_psnr
@@ -69,17 +69,20 @@ class RecursiveCoding(BaseTrainer):
         train_loader = data.DataLoader(
             dataset=train_loader,
             batch_size=params.train_batch_size,
-            shuffle=True
+            shuffle=True,
+            num_workers=2,
         )
         val_loader = data.DataLoader(
             dataset=val_loader,
             batch_size=params.eval_batch_size,
-            shuffle=False
+            shuffle=False,
+            num_workers=2,
         )
         eval_loader = data.DataLoader(
             dataset=eval_loader,
             batch_size=params.eval_batch_size,
-            shuffle=False
+            shuffle=False,
+            num_workers=2,
         )
         return (train_loader, val_loader, eval_loader), dataset_aux
 
@@ -314,6 +317,9 @@ class RecursiveCoding(BaseTrainer):
 
         parser.add_argument('--optimizer.solver', type=str, help='optimizer: optimizer to use')
         parser.add_argument('--optimizer.lr', type=float, help='optimizer: optimizer learning rate')
+        parser.add_argument('--optimizer.lookahead', action='store_true', help='optimizer: to use lookahead')
+        parser.add_argument('--optimizer.lookahead_alpha', type=float, help='optimizer: lookahead alpha')
+        parser.add_argument('--optimizer.lookahead_k', type=int, help='optimizer: lookahead steps (k)')
 
         parser.add_argument('--scheduler.scheduler', type=str, help='scheduler: scheduler to use')
         parser.add_argument('--scheduler.lr_schedule_factor', type=float, help='scheduler: multi_lr: reduction factor')
@@ -334,7 +340,7 @@ class RecursiveCoding(BaseTrainer):
 
         parser.add_argument('--early_stop.mode', type=str, help='early_stop: min/max mode')
         parser.add_argument('--early_stop.delta', type=float, help='early_stop: improvement quantity')
-        parser.add_argument('--early_stop.patience', type=float, help='early_stop: number of epochs to wait')
+        parser.add_argument('--early_stop.patience', type=int, help='early_stop: number of epochs to wait')
         return parser
 
     def __str__(self):

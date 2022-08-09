@@ -9,3 +9,6 @@ The following ideas will be implemented:
 *** Pilots + equaliser
 *** 3GPP channel models
 *** PAPR constraint
+
+* Notes
+** The positional embedding is not good for stability

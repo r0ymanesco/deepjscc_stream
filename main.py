@@ -3,6 +3,7 @@ import numpy as np
 
 from jsonargparse import ArgumentParser, ActionConfigFile
 
+import torch
 from torch.utils.tensorboard import SummaryWriter
 
 
@@ -41,10 +42,13 @@ def get_trainer(shell_params):
 
 
 if __name__ == '__main__':
+    torch.backends.cudnn.benchmark = True
     writer = None
+
     trainer, params = get_trainer(get_params())
-    print(params)
     channel_params = params.channel
+    print(params)
+    print(str(trainer))
 
     if params.eval:
         test_snrs = np.arange(channel_params.test_snr[0], channel_params.test_snr[1]+1)

@@ -7,6 +7,8 @@ import torch.optim.lr_scheduler as LS
 
 from pytorch_msssim import ms_ssim
 
+from modules.lookahead import Lookahead
+
 
 def get_dataloader(dataset, params):
     dataset_aux = {}
@@ -33,8 +35,15 @@ def get_optimizer(params, modules):
         case 'adam':
             solver = optim.Adam(module_params, lr=params.lr)
             optimizer_aux['params'] = f'Adam({params.lr})'
+        case 'radam':
+            solver = optim.RAdam(module_params, lr=params.lr)
+            optimizer_aux['params'] = f'RAdam({params.lr})'
         case _:
             raise NotImplementedError
+
+    if params.lookahead:
+        solver = Lookahead(solver, alpha=params.lookahead_alpha, k=params.lookahead_k)
+        optimizer_aux['params'] += f'_Lookahead({params.lookahead_alpha},{params.lookahead_k})'
 
     return solver, optimizer_aux
 

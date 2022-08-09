@@ -10,8 +10,11 @@ dataset:
   eval_batch_size: 2
 
 optimizer:
-  solver: 'adam'
-  lr: 0.0001
+  solver: 'radam'
+  lr: 0.00001
+  lookahead: true
+  lookahead_k: 4
+  lookahead_alpha: 0.5
 
 scheduler:
   scheduler: 'mult_lr'
@@ -31,8 +34,8 @@ modem:
 
 channel:
   model: 'awgn'
-  train_snr: [10.0]
-  eval_snr: [10.0]
+  train_snr: [100.0]
+  eval_snr: [100.0]
 
 early_stop:
   mode: 'min'
