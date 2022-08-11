@@ -11,10 +11,10 @@ dataset:
 
 optimizer:
   solver: 'radam'
-  lr: 0.00001
-  lookahead: true
-  lookahead_k: 4
-  lookahead_alpha: 0.5
+  lr: 0.0001
+  # lookahead: true
+  # lookahead_k: 4
+  # lookahead_alpha: 0.5
 
 scheduler:
   scheduler: 'mult_lr'

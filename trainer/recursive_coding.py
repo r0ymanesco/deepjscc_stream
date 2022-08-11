@@ -34,7 +34,7 @@ class RecursiveCoding(BaseTrainer):
         self._get_config(params)
 
     def _get_config(self, params):
-        self.job_name = f'{self.trainer}({self.dataset},{self.loss})'
+        self.job_name = f'{self.trainer}({self.loss})'
         self.job_name += f'_{params.comments}' if len(params.comments) != 0 else ''
 
         (self.train_loader,
@@ -168,6 +168,7 @@ class RecursiveCoding(BaseTrainer):
                     epoch_postfix[f'{self.loss} loss'] = '{:.5f}'.format(gop_loss.item())
 
                     if self._training:
+                        self.optimizer.zero_grad()
                         gop_loss.backward()
                         self.optimizer.step()
                     else:
