@@ -83,8 +83,8 @@ def calc_psnr(predictions, targets):
     for (pred, targ) in zip(predictions, targets):
         original = as_img_array(targ)
         prediction = as_img_array(pred)
-        mse = torch.mean((original - prediction)).pow(2)
-        psnr = 10 * torch.log10((255. ** 2) / mse)
+        mse = torch.mean((original - prediction) ** 2., dtype=torch.float32)
+        psnr = 20 * torch.log10(255. / torch.sqrt(mse))
         metric.append(psnr.item())
     return metric
 

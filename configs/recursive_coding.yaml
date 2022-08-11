@@ -1,6 +1,8 @@
 loss: 'l2'
 train_epochs: 200
 save_dir: 'checkpoints/recursive_coding'
+staged_training: false
+feature_stages: 1
 
 dataset:
   dataset: 'ucf101'
@@ -10,7 +12,7 @@ dataset:
   eval_batch_size: 2
 
 optimizer:
-  solver: 'radam'
+  solver: 'adam'
   lr: 0.0001
   # lookahead: true
   # lookahead_k: 4
@@ -34,8 +36,8 @@ modem:
 
 channel:
   model: 'awgn'
-  train_snr: [100.0]
-  eval_snr: [100.0]
+  train_snr: [20.0]
+  eval_snr: [20.0]
 
 early_stop:
   mode: 'min'

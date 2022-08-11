@@ -81,7 +81,7 @@ class TFRecursiveEncoder(nn.Module):
         match stage:
             case 'feature':
                 return self._feature_train(gop)
-            case 'join':
+            case 'joint':
                 return self._joint_train(gop)
             case _:
                 raise ValueError
@@ -164,7 +164,7 @@ class TFRecursiveDecoder(nn.Module):
         match stage:
             case 'feature':
                 return self._feature_train(codes, gop_len)
-            case 'join':
+            case 'joint':
                 return self._joint_train(codes, gop_len)
             case _:
                 raise ValueError

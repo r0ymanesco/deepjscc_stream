@@ -13,6 +13,7 @@ def get_params():
     shell_parse.add_argument('--comments', type=str, default='', help='comments for the job')
     shell_parse.add_argument('--device', type=str, help='device to run job')
     shell_parse.add_argument('--eval', action='store_true', help='whether to go into eval mode directly')
+    shell_parse.add_argument('--resume', action='store_true', help='resume training from last cp epoch')
     shell_parse.add_argument('--config_file', type=str, help='path to the json file containing params')
     shell_params = shell_parse.parse_args()
     return shell_params
@@ -24,6 +25,7 @@ def get_trainer(shell_params):
     parser.add_argument('--comments', type=str, default='', help='comments for the job')
     parser.add_argument('--device', type=str, help='device to run job')
     parser.add_argument('--eval', action='store_true', help='whether to go into eval mode directly')
+    parser.add_argument('--resume', action='store_true', help='resume training from last cp epoch')
     parser.add_argument('--config_file', action=ActionConfigFile, help='path to the yaml file containing params')
 
     parser.add_argument('--loss', type=str, default='', help='loss function')
@@ -34,7 +36,7 @@ def get_trainer(shell_params):
             from trainer.recursive_coding import RecursiveCoding
             parser = RecursiveCoding.get_parser(parser)
             params = parser.parse_args()
-            trainer = RecursiveCoding(params.dataset.dataset, params.loss, params)
+            trainer = RecursiveCoding(params.dataset.dataset, params.loss, params.staged_training, params, params.resume)
         case _:
             raise NotImplementedError
 
