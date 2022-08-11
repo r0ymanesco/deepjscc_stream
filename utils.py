@@ -34,16 +34,16 @@ def get_optimizer(params, modules):
     match params.solver:
         case 'adam':
             solver = optim.Adam(module_params, lr=params.lr)
-            optimizer_aux['params'] = f'Adam({params.lr})'
+            optimizer_aux['str'] = f'Adam({params.lr})'
         case 'radam':
             solver = optim.RAdam(module_params, lr=params.lr)
-            optimizer_aux['params'] = f'RAdam({params.lr})'
+            optimizer_aux['str'] = f'RAdam({params.lr})'
         case _:
             raise NotImplementedError
 
     if params.lookahead:
         solver = Lookahead(solver, alpha=params.lookahead_alpha, k=params.lookahead_k)
-        optimizer_aux['params'] += f'_Lookahead({params.lookahead_alpha},{params.lookahead_k})'
+        optimizer_aux['str'] += f'_Lookahead({params.lookahead_alpha},{params.lookahead_k})'
 
     return solver, optimizer_aux
 
@@ -54,7 +54,7 @@ def get_scheduler(solver, params):
     match params.scheduler:
         case 'mult_lr':
             lr_scheduler = LS.MultiplicativeLR(solver, lr_lambda=lambda x: params.lr_schedule_factor)
-            scheduler_aux['params'] = f'MultLR({params.lr_schedule_factor})'
+            scheduler_aux['str'] = f'MultLR({params.lr_schedule_factor})'
         case _:
             raise NotImplementedError
 

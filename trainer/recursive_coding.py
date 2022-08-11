@@ -31,11 +31,14 @@ class RecursiveCoding(BaseTrainer):
         self.save_dir = params.save_dir
         self.device = params.device
 
+        self.staged_training = params.staged_training
+        self.feature_stage = params.feature_stage
+
         self._get_config(params)
 
     def _get_config(self, params):
         self.job_name = f'{self.trainer}({self.loss})'
-        self.job_name += f'_{params.comments}' if len(params.comments) != 0 else ''
+        self.job_name += f'_Ref({params.comments})' if len(params.comments) != 0 else ''
 
         (self.train_loader,
          self.val_loader,
@@ -50,10 +53,10 @@ class RecursiveCoding(BaseTrainer):
 
         all_modules = (self.encoder, self.decoder, self.modem, self.channel)
         self.optimizer, optimizer_aux = get_optimizer(params.optimizer, all_modules)
-        self.job_name += '_' + optimizer_aux['params']
+        self.job_name += '_' + optimizer_aux['str']
 
         self.lr_scheduler, scheduler_aux = get_scheduler(self.optimizer, params.scheduler)
-        self.job_name += '_' + scheduler_aux['params']
+        self.job_name += '_' + scheduler_aux['str']
 
         self.es = EarlyStopping(mode=params.early_stop.mode,
                                 min_delta=params.early_stop.delta,
@@ -136,8 +139,12 @@ class RecursiveCoding(BaseTrainer):
 
         with tqdm(self.loader, unit='batch') as tepoch:
             for batch_idx, (frames, vid_fns) in enumerate(tepoch):
-                tepoch.set_description('epoch: {}, {}'.format(self.epoch, self.mode))
+                pbar_desc = f'epoch: {self.epoch}, {self.mode}'
+                pbar_desc += f' [{self.stage}]' if self.staged_training is True else ''
+                tepoch.set_description(pbar_desc)
+
                 epoch_postfix = OrderedDict()
+                batch_loss = []
                 batch_psnr = []
                 batch_msssim = []
 
@@ -147,7 +154,7 @@ class RecursiveCoding(BaseTrainer):
                 for (f_start, f_end) in zip(gop_struct[:-1], gop_struct[1:]):
                     gop = frames[f_start:f_end]
                     gop_len = len(gop)
-                    (key_code, int_code), _ = self.encoder(gop)
+                    (key_code, int_code), _ = self.encoder(gop, self.stage)
 
                     key_symbols = self.modem.modulate(key_code)
                     int_symbols = self.modem.modulate(int_code)
@@ -159,13 +166,12 @@ class RecursiveCoding(BaseTrainer):
                     demod_key_symbols = self.modem.demodulate(rx_key_symbols)
                     demod_int_symbols = self.modem.demodulate(rx_int_symbols)
 
-                    predicted_gop, _ = self.decoder((demod_key_symbols, demod_int_symbols), gop_len)
+                    predicted_gop, _ = self.decoder((demod_key_symbols, demod_int_symbols), gop_len, self.stage)
                     pred_gop = torch.stack(predicted_gop, dim=1)
                     targ_gop = torch.stack(gop, dim=1)
 
                     gop_loss, _ = calc_loss(pred_gop, targ_gop, self.loss)
-                    loss_hist.append(gop_loss.item())
-                    epoch_postfix[f'{self.loss} loss'] = '{:.5f}'.format(gop_loss.item())
+                    batch_loss.append(gop_loss.item())
 
                     if self._training:
                         self.optimizer.zero_grad()
@@ -180,6 +186,8 @@ class RecursiveCoding(BaseTrainer):
                         gop_msssim = calc_msssim(predicted_gop, gop)
                         batch_msssim.extend(gop_msssim)
 
+                loss_hist.append(np.nanmean(batch_loss))
+                epoch_postfix[f'{self.loss} loss'] = '{:.5f}'.format(np.nanmean(batch_loss))
                 if not self._training:
                     psnr_hist.extend(batch_psnr)
                     batch_psnr_mean = np.nanmean(batch_psnr)
@@ -274,6 +282,15 @@ class RecursiveCoding(BaseTrainer):
                 self.channel.eval()
                 self.loader = self.eval_loader
 
+        if self.staged_training:
+            self._set_stage()
+
+    def _set_stage(self):
+        if self.epoch < self.feature_stage:
+            self.stage = 'feature'
+        else:
+            self.stage = 'joint'
+
     def save_weights(self):
         if not os.path.exists(self.save_dir):
             print('Creating model directory: {}'.format(self.save_dir))
@@ -309,6 +326,8 @@ class RecursiveCoding(BaseTrainer):
         # depending on the modules used, the parser can be passed through each module and obtain the
         # necessary arguments to be parsed
         parser.add_argument('--save_dir', type=str, help='directory to save checkpoints')
+        parser.add_argument('--staged_training', action='store_true', help='eparate feature and TF training')
+        parser.add_argument('--feature_stage', type=int, help='feature stage training epochs')
 
         parser.add_argument('--dataset.dataset', type=str, help='dataset: dataset to use')
         parser.add_argument('--dataset.path', type=str, help='dataset: path to dataset')
@@ -318,6 +337,7 @@ class RecursiveCoding(BaseTrainer):
 
         parser.add_argument('--optimizer.solver', type=str, help='optimizer: optimizer to use')
         parser.add_argument('--optimizer.lr', type=float, help='optimizer: optimizer learning rate')
+
         parser.add_argument('--optimizer.lookahead', action='store_true', help='optimizer: to use lookahead')
         parser.add_argument('--optimizer.lookahead_alpha', type=float, help='optimizer: lookahead alpha')
         parser.add_argument('--optimizer.lookahead_k', type=int, help='optimizer: lookahead steps (k)')
