@@ -35,7 +35,6 @@ class RecursiveCoding(BaseTrainer):
 
     def _get_config(self, params):
         self.job_name = f'{self.trainer}({self.loss},{self.staged_training},{self.feature_stages})'
-        if len(params.comments) != 0: self.job_name += f'_Ref({params.comments})'
 
         (self.train_loader,
          self.val_loader,
@@ -64,6 +63,8 @@ class RecursiveCoding(BaseTrainer):
         self.scheduler_fn = lambda epochs: epochs % (params.early_stop.patience//2) == 0
 
         if self.resume: self.load_weights()
+
+        if len(params.comments) != 0: self.job_name += f'_Ref({params.comments})'
 
     def _get_data(self, params):
         (train_loader, val_loader, eval_loader), dataset_aux = get_dataloader(params.dataset, params)
@@ -124,9 +125,12 @@ class RecursiveCoding(BaseTrainer):
         self.job_name += '_' + str(channel)
         return channel
 
-    def _get_gop_struct(self, n_frames, gop_len):
-        # FIXME this should be updated after experimentation
-        return np.arange(0, n_frames+1, gop_len)
+    def _get_gop_struct(self, n_frames):
+        if self._training:
+            gop_len = np.random.randint(2, 10)
+        else:
+            gop_len = 5
+        return np.arange(0, n_frames+1, gop_len), gop_len
 
     def __call__(self, snr, *args, **kwargs):
         self.check_mode_set()
@@ -134,7 +138,6 @@ class RecursiveCoding(BaseTrainer):
         loss_hist = []
         psnr_hist = []
         msssim_hist = []
-        gop_len = 5
 
         with tqdm(self.loader, unit='batch') as tepoch:
             for batch_idx, (frames, vid_fns) in enumerate(tepoch):
@@ -150,7 +153,9 @@ class RecursiveCoding(BaseTrainer):
                 n_frames = frames.size(1) // 3
                 frames = torch.chunk(frames.to(self.device), chunks=n_frames, dim=1)
 
-                gop_struct = self._get_gop_struct(n_frames, gop_len)
+                gop_struct, gop_len = self._get_gop_struct(n_frames)
+                epoch_postfix['gop'] = gop_len
+
                 for (f_start, f_end) in zip(gop_struct[:-1], gop_struct[1:]):
                     gop = frames[f_start:f_end]
                     (key_code, int_code), _ = self.encoder(gop, self.stage)

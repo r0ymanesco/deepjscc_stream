@@ -8,8 +8,8 @@ dataset:
   dataset: 'ucf101'
   path: '/home/tt2114/datasets/UCF101'
   frames_per_clip: 25
-  train_batch_size: 2
-  eval_batch_size: 2
+  train_batch_size: 1
+  eval_batch_size: 1
 
 optimizer:
   solver: 'adam'
