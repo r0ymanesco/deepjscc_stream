@@ -11,4 +11,7 @@ The following ideas will be implemented:
 *** PAPR constraint
 
 * Notes
-** The positional embedding is not good for stability
+** Training strategy:
+*** Train (E, D) for all possible gop sizes to obtain best distortion for each size
+*** Train density model to obtain conditional entropy
+*** Use density model to navigate R-D trade off

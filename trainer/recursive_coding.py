@@ -22,26 +22,20 @@ from utils import get_dataloader, get_optimizer, get_scheduler
 
 class RecursiveCoding(BaseTrainer):
     def __init__(self, dataset, loss, staged_training, params, resume=False):
-        super().__init__('RecursiveCoding')
+        super().__init__('RecursiveCoding', dataset, loss, resume, params.device)
 
         self.epoch = 0
-        self.loss = loss
         self.params = params
-        self.dataset = dataset
         self.save_dir = params.save_dir
-        self.device = params.device
         self.staged_training = staged_training
 
         self.feature_stages = params.feature_stages if staged_training else -1
 
         self._get_config(params)
 
-        if resume:
-            self.load_weights()
-
     def _get_config(self, params):
         self.job_name = f'{self.trainer}({self.loss},{self.staged_training},{self.feature_stages})'
-        self.job_name += f'_Ref({params.comments})' if len(params.comments) != 0 else ''
+        if len(params.comments) != 0: self.job_name += f'_Ref({params.comments})'
 
         (self.train_loader,
          self.val_loader,
@@ -68,6 +62,8 @@ class RecursiveCoding(BaseTrainer):
         self.job_name += '_' + str(self.es)
 
         self.scheduler_fn = lambda epochs: epochs % (params.early_stop.patience//2) == 0
+
+        if self.resume: self.load_weights()
 
     def _get_data(self, params):
         (train_loader, val_loader, eval_loader), dataset_aux = get_dataloader(params.dataset, params)
@@ -128,9 +124,9 @@ class RecursiveCoding(BaseTrainer):
         self.job_name += '_' + str(channel)
         return channel
 
-    def _get_gop_struct(self, n_frames):
+    def _get_gop_struct(self, n_frames, gop_len):
         # FIXME this should be updated after experimentation
-        return np.arange(0, n_frames+1, 5)
+        return np.arange(0, n_frames+1, gop_len)
 
     def __call__(self, snr, *args, **kwargs):
         self.check_mode_set()
@@ -138,6 +134,7 @@ class RecursiveCoding(BaseTrainer):
         loss_hist = []
         psnr_hist = []
         msssim_hist = []
+        gop_len = 5
 
         with tqdm(self.loader, unit='batch') as tepoch:
             for batch_idx, (frames, vid_fns) in enumerate(tepoch):
@@ -152,10 +149,10 @@ class RecursiveCoding(BaseTrainer):
 
                 n_frames = frames.size(1) // 3
                 frames = torch.chunk(frames.to(self.device), chunks=n_frames, dim=1)
-                gop_struct = self._get_gop_struct(n_frames)
+
+                gop_struct = self._get_gop_struct(n_frames, gop_len)
                 for (f_start, f_end) in zip(gop_struct[:-1], gop_struct[1:]):
                     gop = frames[f_start:f_end]
-                    gop_len = len(gop)
                     (key_code, int_code), _ = self.encoder(gop, self.stage)
 
                     key_symbols = self.modem.modulate(key_code)
@@ -243,20 +240,17 @@ class RecursiveCoding(BaseTrainer):
     def update_es(self, loss):
         save_nets = False
         update_scheduler = False
-        flag = False
-        if self.es is not None:
-            flag, best_loss, best_epoch, bad_epochs = self.es.step(torch.Tensor([loss]), self.epoch)
-            if flag:
-                print('ES criterion met; loading best weights from epoch {}'.format(best_epoch))
-            else:
-                if bad_epochs == 0:
-                    save_nets = True
-                elif self.scheduler_fn(bad_epochs):
-                    update_scheduler = True
-                print('ES status: best: {:.6f}; bad epochs: {}/{}; best epoch: {}'
-                      .format(best_loss.item(), bad_epochs, self.es.patience, best_epoch))
+
+        flag, best_loss, best_epoch, bad_epochs = self.es.step(torch.Tensor([loss]), self.epoch)
+        if flag:
+            print('ES criterion met; loading best weights from epoch {}'.format(best_epoch))
         else:
-            save_nets = True
+            if bad_epochs == 0:
+                save_nets = True
+            elif self.scheduler_fn(bad_epochs):
+                update_scheduler = True
+            print('ES status: best: {:.6f}; bad epochs: {}/{}; best epoch: {}'
+                    .format(best_loss.item(), bad_epochs, self.es.patience, best_epoch))
         return flag, save_nets, update_scheduler
 
     def _set_mode(self):
@@ -291,6 +285,8 @@ class RecursiveCoding(BaseTrainer):
             self.stage = 'feature'
         else:
             self.stage = 'joint'
+
+        if self.epoch == self.feature_stages+1: self.es.reset()
 
     def save_weights(self):
         if not os.path.exists(self.save_dir):

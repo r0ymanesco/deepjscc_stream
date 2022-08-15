@@ -1,6 +1,11 @@
 class BaseTrainer:
-    def __init__(self, trainer):
+    def __init__(self, trainer, dataset, loss, resume, device='cpu'):
         self.trainer = trainer
+        self.dataset = dataset
+        self.loss = loss
+        self.resume = resume
+        self.device = device
+
         self.mode = None
         self._training = False
         self._validate = False

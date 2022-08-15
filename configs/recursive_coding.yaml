@@ -1,7 +1,7 @@
 loss: 'l2'
 train_epochs: 200
 save_dir: 'checkpoints/recursive_coding'
-staged_training: false
+staged_training: true
 feature_stages: 1
 
 dataset:

@@ -132,25 +132,25 @@ class TFRecursiveDecoder(nn.Module):
         key_frame = self.feature_decoder(z_0)
         gop[0] = torch.sigmoid(key_frame)
 
-        seq_list = [None] * (gop_len-1)
-        trg_list = [z_int] + [None] * (gop_len-1)
+        trg_list = [None] * (gop_len-1)
+        seq_list = [z_int] + [None] * (gop_len-1)
         for i in range(gop_len-1):
-            z_bar = self.auto_feature_encoder(gop[i])
-            seq_list[i] = z_bar
             seq_input = torch.stack(seq_list[:i+1], dim=1)
             # seq_mask = torch.repeat_interleave(
             #     get_mask(len(seq_list), len(seq_list), self.tf_heads, self.feat_dims[1:]), B, dim=0)
             enc_output = self.tf_encoder(seq_input, None) # seq_mask.to(seq_input.device))
 
+            z_bar = self.auto_feature_encoder(gop[i])
+            trg_list[i] = z_bar
             target = torch.stack(trg_list[:i+1], dim=1)
             # trg_mask = torch.repeat_interleave(
             #     get_mask(len(trg_list), len(trg_list), self.tf_heads, self.feat_dims[1:]), B, dim=0)
-
             tf_output = self.tf_decoder(target, enc_output,
                                         src_mask=None, #seq_mask.to(enc_output.device),
                                         trg_mask=None) #trg_mask.to(target.device))
+
             z_next = torch.chunk(tf_output, chunks=i+1, dim=1)[-1]
-            trg_list[i+1] = z_next.squeeze(1)
+            seq_list[i+1] = z_next.squeeze(1)
 
             frame = self.feature_decoder(z_next.squeeze(1))
             gop[i+1] = torch.sigmoid(frame)
