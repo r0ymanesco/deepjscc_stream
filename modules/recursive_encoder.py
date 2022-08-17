@@ -1,10 +1,8 @@
 import ipdb
-import numpy as np
 
 import torch
 import torch.nn as nn
 
-from modules.transformer import TFEncoder
 from modules.transformer2d import TFEncoder2D, TFDecoder2D
 from modules.feature_encoder import FeatureEncoder, FeatureDecoder
 

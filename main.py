@@ -37,6 +37,11 @@ def get_trainer(shell_params):
             parser = RecursiveCoding.get_parser(parser)
             params = parser.parse_args()
             trainer = RecursiveCoding(params.dataset.dataset, params.loss, params.staged_training, params, params.resume)
+        case 'vct_recursive_coding':
+            from trainer.vct_recursive_coding import VCTRecursiveCoding
+            parser = VCTRecursiveCoding.get_parser(parser)
+            params = parser.parse_args()
+            trainer = VCTRecursiveCoding(params.dataset.dataset, params.loss, params.staged_training, params, params.resume)
         case _:
             raise NotImplementedError
 

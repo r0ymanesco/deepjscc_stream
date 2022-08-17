@@ -1,0 +1,47 @@
+loss: 'l2'
+train_epochs: 200
+save_dir: 'checkpoints/vct_recursive_coding'
+staged_training: true
+feature_stages: 2
+
+dataset:
+  dataset: 'ucf101'
+  path: '/home/tt2114/datasets/UCF101'
+  frames_per_clip: 25
+  train_batch_size: 8
+  eval_batch_size: 8
+
+optimizer:
+  solver: 'adam'
+  lr: 0.0001
+  # lookahead: true
+  # lookahead_k: 4
+  # lookahead_alpha: 0.5
+
+scheduler:
+  scheduler: 'mult_lr'
+  lr_schedule_factor: 0.8
+
+encoder:
+  c_in: 3
+  c_feat: 192
+  c_out: 64
+  tf_layers: [6, 4, 5]
+  tf_heads: 16
+  tf_ff: 2048
+  tf_dropout: 0.0
+  c_win: 4
+  p_win: 8
+
+modem:
+  modem: 'continuous'
+
+channel:
+  model: 'awgn'
+  train_snr: [20.0]
+  eval_snr: [20.0]
+
+early_stop:
+  mode: 'min'
+  delta: 0.0
+  patience: 10

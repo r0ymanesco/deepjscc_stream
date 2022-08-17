@@ -14,15 +14,15 @@ from modules.modem import Modem
 from modules.channel import Channel
 from modules.scheduler import EarlyStopping
 from modules.feature_encoder import FeatureEncoder
-from modules.recursive_encoder import TFRecursiveEncoder, TFRecursiveDecoder
+from modules.vct_encoder import VCTRecursiveEncoder, VCTRecursiveDecoder
 
 from utils import calc_loss, calc_msssim, calc_psnr
 from utils import get_dataloader, get_optimizer, get_scheduler
 
 
-class RecursiveCoding(BaseTrainer):
+class VCTRecursiveCoding(BaseTrainer):
     def __init__(self, dataset, loss, staged_training, params, resume=False):
-        super().__init__('RecursiveCoding', dataset, loss, resume, params.device)
+        super().__init__('VCTRecursiveCoding', dataset, loss, resume, params.device)
 
         self.epoch = 0
         self.params = params
@@ -62,9 +62,9 @@ class RecursiveCoding(BaseTrainer):
 
         self.scheduler_fn = lambda epochs: epochs % (params.early_stop.patience//2) == 0
 
-        if self.resume: self.load_weights()
-
         if len(params.comments) != 0: self.job_name += f'_Ref({params.comments})'
+
+        if self.resume: self.load_weights()
 
     def _get_data(self, params):
         (train_loader, val_loader, eval_loader), dataset_aux = get_dataloader(params.dataset, params)
@@ -92,25 +92,29 @@ class RecursiveCoding(BaseTrainer):
     def _get_encoder(self, params, frame_sizes, reduced_arch):
         down_factor = FeatureEncoder.get_config(reduced_arch)
         feat_dims = (params.c_out, *[dim // down_factor for dim in frame_sizes[1:]])
-        encoder = TFRecursiveEncoder(
+        encoder = VCTRecursiveEncoder(
             c_in=params.c_in,
             c_feat=params.c_feat,
             feat_dims=feat_dims,
             reduced=reduced_arch,
+            c_win=params.c_win,
+            p_win=params.p_win,
             tf_layers=params.tf_layers,
             tf_heads=params.tf_heads,
             tf_ff=params.tf_ff,
-            max_seq_len=params.max_seq_len
+            tf_dropout=params.tf_dropout
         ).to(self.device)
-        decoder = TFRecursiveDecoder(
+        decoder = VCTRecursiveDecoder(
             c_in=params.c_in,
             c_feat=params.c_feat,
             feat_dims=feat_dims,
             reduced=reduced_arch,
+            c_win=params.c_win,
+            p_win=params.p_win,
             tf_layers=params.tf_layers,
             tf_heads=params.tf_heads,
             tf_ff=params.tf_ff,
-            max_seq_len=params.max_seq_len
+            tf_dropout=params.tf_dropout
         ).to(self.device)
         self.job_name += '_' + str(encoder) + '_' + str(decoder)
         return encoder, decoder
@@ -127,7 +131,8 @@ class RecursiveCoding(BaseTrainer):
 
     def _get_gop_struct(self, n_frames):
         if self._training:
-            gop_len = np.random.randint(2, 10)  # NOTE this upperbound is due to memory
+            # gop_len = np.random.randint(2, 10)  # NOTE this upperbound is due to memory
+            gop_len = 5
         else:
             gop_len = 5
         return np.arange(0, n_frames+1, gop_len), gop_len
@@ -323,7 +328,6 @@ class RecursiveCoding(BaseTrainer):
 
     @staticmethod
     def get_parser(parser):
-        # TODO organize nested namespaces better
         # can consider a separate file for defining params or putting them in their respective classes
         # depending on the modules used, the parser can be passed through each module and obtain the
         # necessary arguments to be parsed
@@ -350,10 +354,12 @@ class RecursiveCoding(BaseTrainer):
         parser.add_argument('--encoder.c_in', type=int, help='encoder: number of input channels')
         parser.add_argument('--encoder.c_feat', type=int, help='encoder: number of feature channels')
         parser.add_argument('--encoder.c_out', type=int, help='encoder: number of output channels')
-        parser.add_argument('--encoder.tf_layers', type=int, help='encoder: number of attention layers')
+        parser.add_argument('--encoder.tf_layers', type=list, help='encoder: number of attention layers')
         parser.add_argument('--encoder.tf_heads', type=int, help='encoder: number of attention heads')
         parser.add_argument('--encoder.tf_ff', type=int, help='encoder: number of attention dense layers')
-        parser.add_argument('--encoder.max_seq_len', type=int, help='encoder: max number of frames in single codeword')
+        parser.add_argument('--encoder.tf_dropout', type=float, help='encoder: transformer dropout prob')
+        parser.add_argument('--encoder.c_win', type=int, help='encoder: current frame window size')
+        parser.add_argument('--encoder.p_win', type=int, help='encoder: past frame window size')
 
         parser.add_argument('--modem.modem', type=str, help='modem: modem to use')
 
