@@ -59,7 +59,6 @@ if __name__ == '__main__':
 
     if params.eval:
         test_snrs = np.arange(channel_params.test_snr[0], channel_params.test_snr[1]+1)
-        # TODO add eval training loop; dataset etc
     else:
         test_snrs = [channel_params.eval_snr]
 

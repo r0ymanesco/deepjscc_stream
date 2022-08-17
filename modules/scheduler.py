@@ -76,4 +76,4 @@ class EarlyStopping:
         self._init_is_better(self.mode, self.min_delta, self.percentage)
 
     def __str__(self):
-        return f'EarlyStopping({self.mode},{self.min_delta},{self.patience},{self.percentage})'
+        return f'ES({self.mode},{self.min_delta},{self.patience},{self.percentage})'

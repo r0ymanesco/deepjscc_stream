@@ -27,10 +27,10 @@ def get_pad(H, W, c_win):
     return H_pad, W_pad
 
 
-def get_src_tokens(z_int, padding, p_win, c_win):
+def get_src_tokens(z_int, padding, p_win, p_stride):
     z_int_pad = F.pad(z_int, padding)
 
-    z_src = z_int_pad.unfold(2, p_win, c_win).unfold(3, p_win, c_win)
+    z_src = z_int_pad.unfold(2, p_win, p_stride).unfold(3, p_win, p_stride)
     # (B, C, n_patches_h, n_patches_w, p_win, p_win)
     z_src = z_src.permute(0, 2, 3, 4, 5, 1)
     # (B, n_patches_h, n_patches_w, p_win, p_win, C)
@@ -77,7 +77,9 @@ class VCTRecursiveEncoder(nn.Module):
         self.tf_ff = tf_ff
         self.tf_dropout = tf_dropout
 
-        self.H_pad, self.W_pad = get_pad(self.feat_dims[1], self.feat_dims[2], c_win)
+        self.trg_h_pad, self.trg_w_pad = get_pad(self.feat_dims[1], self.feat_dims[2], c_win)
+        self.src_h_pad = [pad + ((p_win - c_win) // 2) for pad in self.trg_h_pad]
+        self.src_w_pad = [pad + ((p_win - c_win) // 2) for pad in self.trg_w_pad]
 
         c_out = feat_dims[0]
         self.c_out = c_out
@@ -96,24 +98,23 @@ class VCTRecursiveEncoder(nn.Module):
         return (z_0, torch.ones_like(z_0)), {}
 
     def _joint_train(self, gop):
-        # TODO do channel emulation
         key_frame = gop[0]
         int_frames = gop[1:]
         B = key_frame.size(0)
 
         z_0 = self.feature_encoder(key_frame)
-        z_0_tokens = get_trg_tokens(z_0, (*self.W_pad, *self.H_pad), self.c_win)
+        z_0_tokens = get_trg_tokens(z_0, (*self.trg_w_pad, *self.trg_h_pad), self.c_win)
         z_patches_h, z_patches_w = z_0_tokens.size(1), z_0_tokens.size(2)
         z_0_tokens = z_0_tokens.view(B*z_patches_h*z_patches_w, -1, self.c_out)
-        z_0_len = z_0_tokens.size(1)
         seq_list = [z_0_tokens]
 
+        # TODO do channel emulation
+        # the frames in batch_int_frames should be expected reconstruction
         batch_int_frames = torch.cat(int_frames, dim=0)
         batch_z_int = self.feature_encoder(batch_int_frames)
-        z_int_tokens = get_trg_tokens(batch_z_int, (*self.W_pad, *self.H_pad), self.c_win)
+        z_int_tokens = get_src_tokens(batch_z_int, (*self.src_w_pad, *self.src_h_pad), self.p_win, self.c_win)
         int_patches_h, int_patches_w = z_int_tokens.size(1), z_int_tokens.size(2)
         z_int_tokens = z_int_tokens.view(B*len(int_frames)*int_patches_h*int_patches_w, -1, self.c_out)
-        # FIXME when using src_tokens, the number of patches may not be the same as trg_tokens
 
         sep_output = self.tf_encoder_sep(z_int_tokens)
         joint_input = sep_output.view(B, len(int_frames), int_patches_h, int_patches_w, -1, self.c_out)
@@ -128,11 +129,11 @@ class VCTRecursiveEncoder(nn.Module):
             target = torch.cat(seq_list, dim=1)
             tf_output = self.tf_decoder(target, joint_output, tgt_mask=trg_mask)
             z_next = torch.chunk(tf_output, chunks=i+1, dim=1)[-1]
+            # TODO should z_next only contain the last token or the entire output?
             seq_list.append(z_next)
 
         z_int = seq_list[-1]
-        H_out = self.feat_dims[1] + sum(self.H_pad)
-        W_out = self.feat_dims[2] + sum(self.W_pad)
+        H_out, W_out = (self.feat_dims[1] + sum(self.trg_h_pad)), (self.feat_dims[2] + sum(self.trg_w_pad))
         z_int = z_int.view(B, z_patches_h, z_patches_w, self.c_win, self.c_win, self.c_out)
         z_int = restore_shape(z_int, (H_out, W_out), self.c_win)
         z_int = torch.split(z_int, [self.feat_dims[1], H_out - self.feat_dims[1]], dim=2)[0]
@@ -149,7 +150,7 @@ class VCTRecursiveEncoder(nn.Module):
                 raise ValueError
 
     def __str__(self):
-        return f'VCTRecursiveEncoder({self.c_in},{self.c_feat},{self.c_out},{self.tf_layers},{self.tf_heads},{self.tf_ff},{self.tf_dropout})'
+        return f'VCTReEncoder({self.c_in},{self.c_feat},{self.c_out},{self.tf_layers},{self.tf_heads},{self.tf_ff},{self.tf_dropout})'
 
 
 class VCTRecursiveDecoder(nn.Module):
@@ -168,7 +169,9 @@ class VCTRecursiveDecoder(nn.Module):
         self.tf_ff = tf_ff
         self.tf_dropout = tf_dropout
 
-        self.H_pad, self.W_pad = get_pad(self.feat_dims[1], self.feat_dims[2], c_win)
+        self.trg_h_pad, self.trg_w_pad = get_pad(self.feat_dims[1], self.feat_dims[2], c_win)
+        self.src_h_pad = [pad + ((p_win - c_win) // 2) for pad in self.trg_h_pad]
+        self.src_w_pad = [pad + ((p_win - c_win) // 2) for pad in self.trg_w_pad]
 
         c_out = feat_dims[0]
         self.c_out = c_out
@@ -191,8 +194,7 @@ class VCTRecursiveDecoder(nn.Module):
         return gop, {}
 
     def _joint_train(self, codes, gop_len):
-        H_out = self.feat_dims[1] + sum(self.H_pad)
-        W_out = self.feat_dims[2] + sum(self.W_pad)
+        H_out, W_out = (self.feat_dims[1] + sum(self.trg_h_pad)), (self.feat_dims[2] + sum(self.trg_w_pad))
 
         z_0, z_int = codes
         gop = []
@@ -203,7 +205,7 @@ class VCTRecursiveDecoder(nn.Module):
         gop.append(torch.sigmoid(key_frame))
 
         z_int = z_int.view((B, *self.feat_dims))
-        z_int_tokens = get_trg_tokens(z_int, (*self.W_pad, *self.H_pad), self.c_win)
+        z_int_tokens = get_trg_tokens(z_int, (*self.trg_w_pad, *self.trg_h_pad), self.c_win)
         z_patches_h, z_patches_w = z_int_tokens.size(1), z_int_tokens.size(2)
         z_int_tokens = z_int_tokens.view(B*z_patches_h*z_patches_w, -1, self.c_out)
 
@@ -211,7 +213,7 @@ class VCTRecursiveDecoder(nn.Module):
         trg_list = [z_int_tokens]
         for i in range(gop_len-1):
             z_bar = self.auto_feature_encoder(gop[i])
-            z_bar_tokens = get_trg_tokens(z_bar, (*self.W_pad, *self.H_pad), self.c_win)
+            z_bar_tokens = get_src_tokens(z_bar, (*self.src_w_pad, *self.src_h_pad), self.p_win, self.c_win)
             seq_list.append(z_bar_tokens)
 
             seq_input = torch.stack(seq_list, dim=1)
@@ -252,4 +254,4 @@ class VCTRecursiveDecoder(nn.Module):
                 raise ValueError
 
     def __str__(self):
-        return f'VCTRecursiveDecoder({self.c_in},{self.c_feat},{self.c_out},{self.tf_layers},{self.tf_heads},{self.tf_ff},{self.tf_dropout})'
+        return f'VCTReDecoder({self.c_in},{self.c_feat},{self.c_out},{self.tf_layers},{self.tf_heads},{self.tf_ff},{self.tf_dropout})'

@@ -2,14 +2,14 @@ loss: 'l2'
 train_epochs: 200
 save_dir: 'checkpoints/vct_recursive_coding'
 staged_training: true
-feature_stages: 2
+feature_stages: 1
 
 dataset:
   dataset: 'ucf101'
   path: '/home/tt2114/datasets/UCF101'
   frames_per_clip: 25
-  train_batch_size: 8
-  eval_batch_size: 8
+  train_batch_size: 4
+  eval_batch_size: 4
 
 optimizer:
   solver: 'adam'

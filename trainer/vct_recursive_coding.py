@@ -328,9 +328,6 @@ class VCTRecursiveCoding(BaseTrainer):
 
     @staticmethod
     def get_parser(parser):
-        # can consider a separate file for defining params or putting them in their respective classes
-        # depending on the modules used, the parser can be passed through each module and obtain the
-        # necessary arguments to be parsed
         parser.add_argument('--save_dir', type=str, help='directory to save checkpoints')
         parser.add_argument('--staged_training', action='store_true', help='eparate feature and TF training')
         parser.add_argument('--feature_stages', type=int, help='feature stage training epochs')
