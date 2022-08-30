@@ -53,31 +53,25 @@ class MultiHeadAttention2D(nn.Module):
         v_seq_len = v.size(1)
 
         # perform linear operation and split into n_heads
-        query = torch.chunk(query, chunks=q_seq_len, dim=1)
-        query = torch.cat(query, dim=0).squeeze(1)
+        query = query.view(bs * q_seq_len, c, h, w)
         query = self.q_conv(query)
-        query = torch.chunk(query, chunks=q_seq_len, dim=0)
-        query = torch.stack(query, dim=1).unsqueeze(2)
+        query = query.view(bs, q_seq_len, 1, c, h, w)
         # dims (bs, q_seq_len, k_seq_len, c, h, w)
         query = torch.repeat_interleave(query, k_seq_len, dim=2)
 
-        k = torch.chunk(k, chunks=k_seq_len, dim=1)
-        k = torch.cat(k, dim=0).squeeze(1)
+        k = k.view(bs * k_seq_len, c, h, w)
         k = self.k_conv(k)
-        k = torch.chunk(k, chunks=k_seq_len, dim=0)
-        k = torch.stack(k, dim=1).unsqueeze(1)
+        k = k.view(bs, 1, k_seq_len, c, h, w)
         # dims (bs, q_seq_len, k_seq_len, c, h, w)
         k = torch.repeat_interleave(k, q_seq_len, dim=1)
 
-        v = torch.chunk(v, chunks=v_seq_len, dim=1)
-        v = torch.cat(v, dim=0).squeeze(1)
+        v = v.view(bs * v_seq_len, c, h, w)
         v = self.v_conv(v)
-        v = torch.chunk(v, chunks=v_seq_len, dim=0)
-        v = torch.stack(v, dim=1).unsqueeze(1)
-        # dims (bs, q_seq_len, k_seq_len, c, h, w)
+        v = v.view(bs, 1, v_seq_len, c, h, w)
+        # dims (bs, q_seq_len, v_seq_len, c, h, w)
         v = torch.repeat_interleave(v, q_seq_len, dim=1)
         v = v.view(bs, q_seq_len, k_seq_len, self.n_heads, c//self.n_heads, h, w)
-        # dims (bs, q_seq_len, n_heads, k_seq_len, c//n_heads, h, w)
+        # dims (bs, q_seq_len, n_heads, v_seq_len, c//n_heads, h, w)
         v = v.transpose(2, 3)
 
         # calculate attention
@@ -139,17 +133,14 @@ class FeedForward2D(nn.Module):
 
     def forward(self, x):
         # assumes input shape (bs, seq_len, c, h, w)
-        in_shape = x.size()
-        seq_len = x.size(1)
+        bs, seq_len, c, h, w = x.size()
 
-        x = torch.chunk(x, chunks=seq_len, dim=1)
-        x = torch.cat(x, dim=0).squeeze(1)
+        x = x.view(bs * seq_len, c, h, w)
         x = self.dropout(F.relu(self.conv1(x)))
         x = self.conv2(x)
-        x = torch.chunk(x, chunks=seq_len, dim=0)
-        x = torch.stack(x, dim=1)
+        x = x.view(bs, seq_len, c, h, w)
         # returns shape (bs, seq_len, c, h, w)
-        return x.view(in_shape)
+        return x
 
 
 class EncoderLayer2D(nn.Module):
@@ -166,20 +157,16 @@ class EncoderLayer2D(nn.Module):
 
     def forward(self, x, mask=None):
         # assumes input shape (bs, seq_len, c, h, w)
-        seq_len = x.size(1)
+        bs, seq_len, c, h, w = x.size()
 
-        x2 = torch.chunk(x, chunks=seq_len, dim=1)
-        x2 = torch.cat(x2, dim=0).squeeze(1)
+        x2 = x.view(bs * seq_len, c, h, w)
         x2 = self.norm_1(x2)
-        x2 = torch.chunk(x2, chunks=seq_len, dim=0)
-        x2 = torch.stack(x2, dim=1)
+        x2 = x2.view(bs, seq_len, c, h, w)
         x = x + self.dropout_1(self.attn(x2, x2, x2, mask))
 
-        x2 = torch.chunk(x, chunks=seq_len, dim=1)
-        x2 = torch.cat(x2, dim=0).squeeze(1)
+        x2 = x.view(bs * seq_len, c, h, w)
         x2 = self.norm_2(x2)
-        x2 = torch.chunk(x2, chunks=seq_len, dim=0)
-        x2 = torch.stack(x2, dim=1)
+        x2 = x2.view(bs, seq_len, c, h, w)
         x = x + self.dropout_2(self.ff(x2))
         return x
 
@@ -201,27 +188,21 @@ class DecoderLayer2D(nn.Module):
 
     def forward(self, x, enc_output, src_mask=None, trg_mask=None):
         # assumes input shape (bs, seq_len, c, h, w)
-        seq_len = x.size(1)
+        bs, seq_len, c, h, w = x.size()
 
-        x2 = torch.chunk(x, chunks=seq_len, dim=1)
-        x2 = torch.cat(x2, dim=0).squeeze(1)
+        x2 = x.view(bs * seq_len, c, h, w)
         x2 = self.norm_1(x2)
-        x2 = torch.chunk(x2, chunks=seq_len, dim=0)
-        x2 = torch.stack(x2, dim=1)
+        x2 = x2.view(bs, seq_len, c, h, w)
         x = x + self.dropout_1(self.attn_1(x2, x2, x2, trg_mask))
 
-        x2 = torch.chunk(x, chunks=seq_len, dim=1)
-        x2 = torch.cat(x2, dim=0).squeeze(1)
+        x2 = x.view(bs * seq_len, c, h, w)
         x2 = self.norm_2(x2)
-        x2 = torch.chunk(x2, chunks=seq_len, dim=0)
-        x2 = torch.stack(x2, dim=1)
+        x2 = x2.view(bs, seq_len, c, h, w)
         x = x + self.dropout_2(self.attn_2(x2, enc_output, enc_output, src_mask))
 
-        x2 = torch.chunk(x, chunks=seq_len, dim=1)
-        x2 = torch.cat(x2, dim=0).squeeze(1)
+        x2 = x.view(bs * seq_len, c, h, w)
         x2 = self.norm_3(x2)
-        x2 = torch.chunk(x2, chunks=seq_len, dim=0)
-        x2 = torch.stack(x2, dim=1)
+        x2 = x2.view(bs, seq_len, c, h ,w)
         x = x + self.dropout_3(self.ff(x2))
         # returns shape (bs, seq_len, c, h, w)
         return x
@@ -249,7 +230,7 @@ class TFEncoder2D(nn.Module):
 
     def forward(self, x, mask=None):
         # assumes input shape (bs, seq_len, c, h, w)
-        seq_len = x.size(1)
+        bs, seq_len, c, h, w = x.size()
 
         # x = self.pe(x)
 
@@ -259,11 +240,9 @@ class TFEncoder2D(nn.Module):
         for layer in self.layers:
             x = layer(x, mask)
 
-        x = torch.chunk(x, chunks=seq_len, dim=1)
-        x = torch.cat(x, dim=0).squeeze(1)
+        x = x.view(bs * seq_len, c, h, w)
         x = self.norm(x)
-        x = torch.chunk(x, chunks=seq_len, dim=0)
-        x = torch.stack(x, dim=1)
+        x = x.view(bs, seq_len, c, h, w)
         # returns shape (bs, seq_len, c, h, w)
         return x
 
@@ -292,7 +271,7 @@ class TFDecoder2D(nn.Module):
 
     def forward(self, x, enc_output, src_mask=None, trg_mask=None):
         # assumes input shape (bs, seq_len, c, h, w)
-        seq_len = x.size(1)
+        bs, seq_len, c, h, w = x.size()
 
         # x = self.pe(x)
 
@@ -302,10 +281,8 @@ class TFDecoder2D(nn.Module):
         for layer in self.layers:
             x = layer(x, enc_output, src_mask, trg_mask)
 
-        x = torch.chunk(x, chunks=seq_len, dim=1)
-        x = torch.cat(x, dim=0).squeeze(1)
+        x = x.view(bs * seq_len, c, h, w)
         x = self.norm(x)
-        x = torch.chunk(x, chunks=seq_len, dim=0)
-        x = torch.stack(x, dim=1)
+        x = x.view(bs, seq_len, c, h, w)
         # returns shape (bs, seq_len, c, h, w)
         return x

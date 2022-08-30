@@ -88,7 +88,7 @@ if __name__ == '__main__':
             print('Training complete'); break
 
     print('Evaluating...')
-    # TODO potentially separate this from main
+    # TODO separate this from main
     for snr in test_snrs:
         trainer.evaluate()
         _, _, eval_aux = trainer(snr)
@@ -98,6 +98,6 @@ if __name__ == '__main__':
 
         for data_key in eval_aux:
             writer.add_scalars(f'Evaluate/{data_key}',
-                               {f'{str(trainer)}': eval_aux[data_key]}, snr)
+                               {f'{str(trainer)}': eval_aux[data_key]}, snr[0])
 
     writer.close()

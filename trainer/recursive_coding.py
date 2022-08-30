@@ -127,7 +127,8 @@ class RecursiveCoding(BaseTrainer):
 
     def _get_gop_struct(self, n_frames):
         if self._training:
-            gop_len = np.random.randint(2, 10)  # NOTE this upperbound is due to memory
+            # gop_len = np.random.randint(3, 10)  # NOTE this upperbound is due to memory
+            gop_len = 5
         else:
             gop_len = 5
         return np.arange(0, n_frames+1, gop_len), gop_len

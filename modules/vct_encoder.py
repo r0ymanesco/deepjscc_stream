@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from modules.feature_encoder_simple import FeatureEncoderSimple, FeatureDecoderSimple
+from modules.feature_encoder import FeatureEncoder, FeatureDecoder
 
 
 def get_mask(q_len, k_len):
@@ -83,7 +84,8 @@ class VCTRecursiveEncoder(nn.Module):
 
         c_out = feat_dims[0]
         self.c_out = c_out
-        self.feature_encoder = FeatureEncoderSimple(c_in, c_feat, c_out, reduced)
+        # self.feature_encoder = FeatureEncoderSimple(c_in, c_feat, c_out, reduced)
+        self.feature_encoder = FeatureEncoder(c_in, c_feat, c_out, reduced)
 
         tf_encoder_layer = nn.TransformerEncoderLayer(c_out, tf_heads, tf_ff, tf_dropout, batch_first=True)
         self.tf_encoder_sep = nn.TransformerEncoder(tf_encoder_layer, num_layers=tf_layers[0])
@@ -175,8 +177,10 @@ class VCTRecursiveDecoder(nn.Module):
 
         c_out = feat_dims[0]
         self.c_out = c_out
-        self.feature_decoder = FeatureDecoderSimple(c_out, c_feat, c_in, reduced)
-        self.auto_feature_encoder = FeatureEncoderSimple(c_in, c_feat, c_out, reduced)
+        # self.feature_decoder = FeatureDecoderSimple(c_out, c_feat, c_in, reduced)
+        # self.auto_feature_encoder = FeatureEncoderSimple(c_in, c_feat, c_out, reduced)
+        self.feature_decoder = FeatureDecoder(c_out, c_feat, c_in, reduced)
+        self.auto_feature_encoder = FeatureEncoder(c_in, c_feat, c_out, reduced)
 
         tf_encoder_layer = nn.TransformerEncoderLayer(c_out, tf_heads, tf_ff, tf_dropout, batch_first=True)
         self.tf_encoder_sep = nn.TransformerEncoder(tf_encoder_layer, num_layers=tf_layers[0])
