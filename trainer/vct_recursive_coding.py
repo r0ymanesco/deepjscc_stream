@@ -163,19 +163,16 @@ class VCTRecursiveCoding(BaseTrainer):
 
                 for (f_start, f_end) in zip(gop_struct[:-1], gop_struct[1:]):
                     gop = frames[f_start:f_end]
-                    (key_code, int_code), _ = self.encoder(gop, self.stage)
+                    code, _ = self.encoder(gop, self.stage)
 
-                    key_symbols = self.modem.modulate(key_code)
-                    int_symbols = self.modem.modulate(int_code)
+                    symbols = self.modem.modulate(code)
 
-                    rx_key_symbols, channel_aux = self.channel(key_symbols, snr)
-                    rx_int_symbols, _ = self.channel(int_symbols, [channel_aux['channel_snr']])
+                    rx_symbols, channel_aux = self.channel(symbols, snr)
                     epoch_postfix['snr'] = '{:.2f}'.format(channel_aux['channel_snr'])
 
-                    demod_key_symbols = self.modem.demodulate(rx_key_symbols)
-                    demod_int_symbols = self.modem.demodulate(rx_int_symbols)
+                    demod_symbols = self.modem.demodulate(rx_symbols)
 
-                    predicted_gop, _ = self.decoder((demod_key_symbols, demod_int_symbols), gop_len, self.stage)
+                    predicted_gop, _ = self.decoder(demod_symbols, gop_len, self.stage)
                     pred_gop = torch.stack(predicted_gop, dim=1)
                     targ_gop = torch.stack(gop, dim=1)
 

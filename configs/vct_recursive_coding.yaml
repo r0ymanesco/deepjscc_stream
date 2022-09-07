@@ -1,5 +1,5 @@
 loss: 'l2'
-train_epochs: 200
+train_epochs: 500
 save_dir: 'checkpoints/vct_recursive_coding'
 staged_training: true
 feature_stages: 1
@@ -25,7 +25,7 @@ scheduler:
 encoder:
   c_in: 3
   c_feat: 192
-  c_out: 64
+  c_out: 128
   tf_layers: [6, 4, 5]
   tf_heads: 16
   tf_ff: 2048

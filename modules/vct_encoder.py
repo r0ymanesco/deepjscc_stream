@@ -8,9 +8,11 @@ from modules.feature_encoder_simple import FeatureEncoderSimple, FeatureDecoderS
 from modules.feature_encoder import FeatureEncoder, FeatureDecoder
 
 
-def get_mask(q_len, k_len):
-    mask = torch.ones(q_len, k_len).to(torch.bool)
-    mask = torch.triu(mask, diagonal=1)
+def get_mask(q_len, k_len, dims):
+    block = torch.ones(dims, dims)
+    loc = torch.ones(q_len, k_len)
+    loc = torch.tril(loc, diagonal=0)
+    mask = ~torch.kron(loc, block).to(torch.bool)
     return mask
 
 
@@ -81,11 +83,13 @@ class VCTRecursiveEncoder(nn.Module):
         self.trg_h_pad, self.trg_w_pad = get_pad(self.feat_dims[1], self.feat_dims[2], c_win)
         self.src_h_pad = [pad + ((p_win - c_win) // 2) for pad in self.trg_h_pad]
         self.src_w_pad = [pad + ((p_win - c_win) // 2) for pad in self.trg_w_pad]
+        n_patches_h = (self.feat_dims[1] + sum(self.trg_h_pad)) // c_win
+        n_patches_w = (self.feat_dims[2] + sum(self.trg_w_pad)) // c_win
 
         c_out = feat_dims[0]
         self.c_out = c_out
-        # self.feature_encoder = FeatureEncoderSimple(c_in, c_feat, c_out, reduced)
-        self.feature_encoder = FeatureEncoder(c_in, c_feat, c_out, reduced)
+        self.feature_encoder = FeatureEncoderSimple(c_in, c_feat, c_out, reduced)
+        # self.feature_encoder = FeatureEncoder(c_in, c_feat, c_out, reduced)
 
         tf_encoder_layer = nn.TransformerEncoderLayer(c_out, tf_heads, tf_ff, tf_dropout, batch_first=True)
         self.tf_encoder_sep = nn.TransformerEncoder(tf_encoder_layer, num_layers=tf_layers[0])
@@ -94,53 +98,42 @@ class VCTRecursiveEncoder(nn.Module):
         tf_decoder_layer = nn.TransformerDecoderLayer(c_out, tf_heads, tf_ff, tf_dropout, batch_first=True)
         self.tf_decoder = nn.TransformerDecoder(tf_decoder_layer, num_layers=tf_layers[2])
 
+        self.codeword_query = nn.parameter.Parameter(torch.rand(n_patches_h*n_patches_w, c_win*c_win, c_out))
+
     def _feature_train(self, gop):
         frames = torch.cat(gop, dim=0)
         z_0 = self.feature_encoder(frames)
-        return (z_0, torch.ones_like(z_0)), {}
+        return z_0, {}
 
     def _joint_train(self, gop):
-        key_frame = gop[0]
-        int_frames = gop[1:]
-        B = key_frame.size(0)
-
-        z_0 = self.feature_encoder(key_frame)
-        z_0_tokens = get_trg_tokens(z_0, (*self.trg_w_pad, *self.trg_h_pad), self.c_win)
-        z_patches_h, z_patches_w = z_0_tokens.size(1), z_0_tokens.size(2)
-        z_0_tokens = z_0_tokens.view(B*z_patches_h*z_patches_w, -1, self.c_out)
-        seq_list = [z_0_tokens]
+        B = gop[0].size(0)
 
         # TODO do channel emulation
         # the frames in batch_int_frames should be expected reconstruction
-        batch_int_frames = torch.cat(int_frames, dim=0)
-        batch_z_int = self.feature_encoder(batch_int_frames)
-        z_int_tokens = get_src_tokens(batch_z_int, (*self.src_w_pad, *self.src_h_pad), self.p_win, self.c_win)
-        int_patches_h, int_patches_w = z_int_tokens.size(1), z_int_tokens.size(2)
-        z_int_tokens = z_int_tokens.view(B*len(int_frames)*int_patches_h*int_patches_w, -1, self.c_out)
+        batch_int_frames = torch.cat(gop, dim=0)
+        batch_y = self.feature_encoder(batch_int_frames)
+        y_tokens = get_src_tokens(batch_y, (*self.src_w_pad, *self.src_h_pad), self.p_win, self.c_win)
+        # (B, n_patches_h, n_patches_w, p_win, p_win, C)
+        n_patches_h, n_patches_w = y_tokens.size(1), y_tokens.size(2)
 
-        sep_output = self.tf_encoder_sep(z_int_tokens)
-        joint_input = sep_output.view(B, len(int_frames), int_patches_h, int_patches_w, -1, self.c_out)
+        sep_input = y_tokens.view(B*len(gop)*n_patches_h*n_patches_w, -1, self.c_out)
+        sep_output = self.tf_encoder_sep(sep_input)
+
+        joint_input = sep_output.view(B, len(gop), n_patches_h, n_patches_w, -1, self.c_out)
         joint_input = joint_input.permute(0, 2, 3, 1, 4, 5).contiguous()
-        # (B, int_patches_h, int_patches_w, len(int_frames), -1, c_out)
-        joint_input = joint_input.view(B*int_patches_h*int_patches_w, -1, self.c_out)
+        # (B, n_patches_h, n_patches_w, len(gop), -1, c_out)
+        joint_input = joint_input.view(B*n_patches_h*n_patches_w, -1, self.c_out)
         joint_output = self.tf_encoder_joint(joint_input)
 
-        # trg_mask = get_mask(z_0_len, z_0_len).to(z_0.device)
-        trg_mask = None
-        for i in range(len(int_frames)):
-            target = torch.cat(seq_list, dim=1)
-            tf_output = self.tf_decoder(target, joint_output, tgt_mask=trg_mask)
-            z_next = torch.chunk(tf_output, chunks=i+1, dim=1)[-1]
-            # TODO should z_next only contain the last token or the entire output?
-            seq_list.append(z_next)
+        batch_codeword_query = self.codeword_query.tile((B, 1, 1))
+        codeword = self.tf_decoder(batch_codeword_query, joint_output)
 
-        z_int = seq_list[-1]
         H_out, W_out = (self.feat_dims[1] + sum(self.trg_h_pad)), (self.feat_dims[2] + sum(self.trg_w_pad))
-        z_int = z_int.view(B, z_patches_h, z_patches_w, self.c_win, self.c_win, self.c_out)
-        z_int = restore_shape(z_int, (H_out, W_out), self.c_win)
-        z_int = torch.split(z_int, [self.feat_dims[1], H_out - self.feat_dims[1]], dim=2)[0]
-        z_int = torch.split(z_int, [self.feat_dims[2], W_out - self.feat_dims[2]], dim=3)[0]
-        return (z_0, z_int.contiguous()), {}
+        codeword = codeword.view(B, n_patches_h, n_patches_w, self.c_win, self.c_win, self.c_out)
+        codeword = restore_shape(codeword, (H_out, W_out), self.c_win)
+        codeword = torch.split(codeword, [self.feat_dims[1], H_out - self.feat_dims[1]], dim=2)[0]
+        codeword = torch.split(codeword, [self.feat_dims[2], W_out - self.feat_dims[2]], dim=3)[0]
+        return codeword.contiguous(), {}
 
     def forward(self, gop, stage):
         match stage:
@@ -174,75 +167,58 @@ class VCTRecursiveDecoder(nn.Module):
         self.trg_h_pad, self.trg_w_pad = get_pad(self.feat_dims[1], self.feat_dims[2], c_win)
         self.src_h_pad = [pad + ((p_win - c_win) // 2) for pad in self.trg_h_pad]
         self.src_w_pad = [pad + ((p_win - c_win) // 2) for pad in self.trg_w_pad]
+        n_patches_h = (self.feat_dims[1] + sum(self.trg_h_pad)) // c_win
+        n_patches_w = (self.feat_dims[2] + sum(self.trg_w_pad)) // c_win
 
         c_out = feat_dims[0]
         self.c_out = c_out
-        # self.feature_decoder = FeatureDecoderSimple(c_out, c_feat, c_in, reduced)
+        self.feature_decoder = FeatureDecoderSimple(c_out, c_feat, c_in, reduced)
         # self.auto_feature_encoder = FeatureEncoderSimple(c_in, c_feat, c_out, reduced)
-        self.feature_decoder = FeatureDecoder(c_out, c_feat, c_in, reduced)
-        self.auto_feature_encoder = FeatureEncoder(c_in, c_feat, c_out, reduced)
+        # self.feature_decoder = FeatureDecoder(c_out, c_feat, c_in, reduced)
+        # self.auto_feature_encoder = FeatureEncoder(c_in, c_feat, c_out, reduced)
 
-        tf_encoder_layer = nn.TransformerEncoderLayer(c_out, tf_heads, tf_ff, tf_dropout, batch_first=True)
-        self.tf_encoder_sep = nn.TransformerEncoder(tf_encoder_layer, num_layers=tf_layers[0])
-        self.tf_encoder_joint = nn.TransformerEncoder(tf_encoder_layer, num_layers=tf_layers[1])
+        # tf_encoder_layer = nn.TransformerEncoderLayer(c_out, tf_heads, tf_ff, tf_dropout, batch_first=True)
+        # self.tf_encoder_sep = nn.TransformerEncoder(tf_encoder_layer, num_layers=tf_layers[0])
+        # self.tf_encoder_joint = nn.TransformerEncoder(tf_encoder_layer, num_layers=tf_layers[1])
 
         tf_decoder_layer = nn.TransformerDecoderLayer(c_out, tf_heads, tf_ff, tf_dropout, batch_first=True)
         self.tf_decoder = nn.TransformerDecoder(tf_decoder_layer, num_layers=tf_layers[2])
 
+        self.codeword_query = nn.parameter.Parameter(torch.rand(n_patches_h*n_patches_w, c_win*c_win, c_out))
+
     def _feature_train(self, codes, gop_len):
-        z_0, _ = codes
+        z_0 = codes
         B = z_0.size(0)
         z_0 = z_0.view((B, *self.feat_dims))
         frames = self.feature_decoder(z_0)
         gop = torch.chunk(frames, chunks=gop_len, dim=0)
         return gop, {}
 
-    def _joint_train(self, codes, gop_len):
+    def _joint_train(self, codeword, gop_len):
+        B = codeword.size(0)
         H_out, W_out = (self.feat_dims[1] + sum(self.trg_h_pad)), (self.feat_dims[2] + sum(self.trg_w_pad))
-
-        z_0, z_int = codes
         gop = []
 
-        B = z_0.size(0)
-        z_0 = z_0.view((B, *self.feat_dims))
-        key_frame = self.feature_decoder(z_0)
-        gop.append(torch.sigmoid(key_frame))
+        src_codeword = codeword.view((B, *self.feat_dims))
+        y_tokens = get_trg_tokens(src_codeword, (*self.trg_w_pad, *self.trg_h_pad), self.c_win)
+        n_patches_h, n_patches_w = y_tokens.size(1), y_tokens.size(2)
+        src_tokens = y_tokens.view(B*n_patches_h*n_patches_w, -1, self.c_out)
 
-        z_int = z_int.view((B, *self.feat_dims))
-        z_int_tokens = get_trg_tokens(z_int, (*self.trg_w_pad, *self.trg_h_pad), self.c_win)
-        z_patches_h, z_patches_w = z_int_tokens.size(1), z_int_tokens.size(2)
-        z_int_tokens = z_int_tokens.view(B*z_patches_h*z_patches_w, -1, self.c_out)
-
-        seq_list = []
-        trg_list = [z_int_tokens]
-        for i in range(gop_len-1):
-            z_bar = self.auto_feature_encoder(gop[i])
-            z_bar_tokens = get_src_tokens(z_bar, (*self.src_w_pad, *self.src_h_pad), self.p_win, self.c_win)
-            seq_list.append(z_bar_tokens)
-
-            seq_input = torch.stack(seq_list, dim=1)
-            int_patches_h, int_patches_w = seq_input.size(2), seq_input.size(3)
-            seq_input = seq_input.view(B*len(seq_list)*int_patches_h*int_patches_w, -1, self.c_out)
-
-            sep_output = self.tf_encoder_sep(seq_input)
-            joint_input = sep_output.view(B, len(seq_list), int_patches_h, int_patches_w, -1, self.c_out)
-            joint_input = joint_input.permute(0, 2, 3, 1, 4, 5).contiguous()
-            joint_input = joint_input.view(B*int_patches_h*int_patches_w, -1, self.c_out)
-            joint_output = self.tf_encoder_joint(joint_input)
-
+        start_query = self.codeword_query.tile((B, 1, 1))
+        trg_list = [start_query]
+        for i in range(gop_len):
             target = torch.cat(trg_list, dim=1)
-            # trg_mask = get_mask(len(trg_list), len(trg_list)).to(target.device)
-            trg_mask = None
-            tf_output = self.tf_decoder(target, joint_output, tgt_mask=trg_mask)
+            trg_mask = get_mask(len(trg_list), len(trg_list), self.c_win**2).to(target.device)
+            tf_output = self.tf_decoder(target, src_tokens, tgt_mask=trg_mask)
 
-            z_next = torch.chunk(tf_output, chunks=i+1, dim=1)[-1]
-            trg_list.append(z_next)
+            y_next = torch.chunk(tf_output, chunks=i+1, dim=1)[-1]
+            trg_list.append(y_next)
 
-            z_feat = z_next.view(B, z_patches_h, z_patches_w, self.c_win, self.c_win, self.c_out)
-            z_feat = restore_shape(z_feat, (H_out, W_out), self.c_win)
-            z_feat = torch.split(z_feat, [self.feat_dims[1], H_out - self.feat_dims[1]], dim=2)[0]
-            z_feat = torch.split(z_feat, [self.feat_dims[2], W_out - self.feat_dims[2]], dim=3)[0]
-            frame = self.feature_decoder(z_feat)
+            y_feat = y_next.view(B, n_patches_h, n_patches_w, self.c_win, self.c_win, self.c_out)
+            y_feat = restore_shape(y_feat, (H_out, W_out), self.c_win)
+            y_feat = torch.split(y_feat, [self.feat_dims[1], H_out - self.feat_dims[1]], dim=2)[0]
+            y_feat = torch.split(y_feat, [self.feat_dims[2], W_out - self.feat_dims[2]], dim=3)[0]
+            frame = self.feature_decoder(y_feat)
             gop.append(torch.sigmoid(frame))
 
         assert len(gop) == gop_len
