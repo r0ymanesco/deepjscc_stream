@@ -1,15 +1,14 @@
 loss: 'l2'
 train_epochs: 500
-save_dir: 'checkpoints/recursive_coding'
-staged_training: true
-feature_stages: 1
+save_dir: 'checkpoints/vct_recursive_coding'
+coding_stages: 200
 
 dataset:
   dataset: 'ucf101'
   path: '/home/tt2114/datasets/UCF101'
   frames_per_clip: 25
-  train_batch_size: 4
-  eval_batch_size: 4
+  train_batch_size: 5
+  eval_batch_size: 5
 
 optimizer:
   solver: 'adam'
@@ -24,12 +23,14 @@ scheduler:
 
 encoder:
   c_in: 3
-  c_feat: 256
+  c_feat: 192
   c_out: 128
-  tf_layers: 8
-  tf_heads: 1
-  tf_ff: 256
-  max_seq_len: 20
+  tf_layers: [6, 4, 5]
+  tf_heads: 16
+  tf_ff: 2048
+  tf_dropout: 0.0
+  c_win: 4
+  p_win: 8
 
 modem:
   modem: 'continuous'

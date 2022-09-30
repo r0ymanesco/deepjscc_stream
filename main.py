@@ -1,3 +1,4 @@
+import os
 import ipdb
 import numpy as np
 
@@ -42,6 +43,11 @@ def get_trainer(shell_params):
             parser = VCTRecursiveCoding.get_parser(parser)
             params = parser.parse_args()
             trainer = VCTRecursiveCoding(params.dataset.dataset, params.loss, params.staged_training, params, params.resume)
+        case 'vct_bandwidth_allocation':
+            from trainer.vct_bandwidth_allocation import VCTBandwidthAllocation
+            parser = VCTBandwidthAllocation.get_parser(parser)
+            params = parser.parse_args()
+            trainer = VCTBandwidthAllocation(params.dataset.dataset, params.loss, params, params.resume)
         case _:
             raise NotImplementedError
 
@@ -49,6 +55,7 @@ def get_trainer(shell_params):
 
 
 if __name__ == '__main__':
+    # os.environ["CUDA_VISIBLE_DEVICES"] = "1"
     torch.backends.cudnn.benchmark = True
     writer = None
 

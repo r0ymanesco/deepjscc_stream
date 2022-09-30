@@ -100,12 +100,12 @@ def calc_msssim(predictions, targets):
     return metric
 
 
-def calc_loss(prediction, target, loss):
+def calc_loss(prediction, target, loss, reduction='mean'):
     loss_aux = {}
 
     match loss:
         case 'l2':
-            loss = F.mse_loss(prediction, target)
+            loss = F.mse_loss(prediction, target, reduction=reduction)
         case 'msssim':
             loss = 1 - ms_ssim(prediction, target,
                                data_range=1, size_average=True)
