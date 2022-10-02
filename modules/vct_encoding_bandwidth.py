@@ -69,34 +69,6 @@ def restore_shape(patches, output_shape, stride):
     return restored.contiguous()
 
 
-class VCTPredictor(nn.Module):
-    def __init__(self, feat_dims, c_win, p_win):
-        super().__init__()
-        c_out = feat_dims[0]
-        self.trg_h_pad, self.trg_w_pad = get_pad(feat_dims[1], feat_dims[2], c_win)
-        self.src_h_pad = [pad + ((p_win - c_win) // 2) for pad in self.trg_h_pad]
-        self.src_w_pad = [pad + ((p_win - c_win) // 2) for pad in self.trg_w_pad]
-        n_patches_h = (feat_dims[1] + sum(self.trg_h_pad)) // c_win
-        n_patches_w = (feat_dims[2] + sum(self.trg_w_pad)) // c_win
-
-        self.quality_predictor = nn.Sequential(
-            nn.Linear(n_patches_h*n_patches_w*c_out, n_patches_h*n_patches_w*c_out),
-            nn.LeakyReLU(),
-            nn.Linear(n_patches_h*n_patches_w*c_out, n_patches_h*n_patches_w*c_out),
-            nn.LeakyReLU(),
-            nn.Linear(n_patches_h*n_patches_w*c_out, 1)
-        )
-
-    def forward(self, conditional_tokens):
-        ipdb.set_trace()
-        B = conditional_tokens[0].size(0)
-        batched_tokens = torch.cat(conditional_tokens, dim=0)
-        prediction = self.quality_predictor(
-            batched_tokens.view(B*len(conditional_tokens), -1)
-        )
-        return prediction
-
-
 class VCTEncoderBandwidth(nn.Module):
     def __init__(self, c_in, c_feat, feat_dims, reduced, c_win, p_win,
                  tf_layers, tf_heads, tf_ff, tf_dropout=0.):
@@ -165,6 +137,7 @@ class VCTEncoderBandwidth(nn.Module):
         batch_int_frames = torch.cat(gop, dim=0)
         batch_y = self.feature_encoder(batch_int_frames)
         prev_y, int_y = torch.split(batch_y, [B*n_prev_tokens, B], dim=0)
+        # FIXME do channel emulation for reference frames
 
         prev_tokens = get_src_tokens(prev_y, (*self.src_w_pad, *self.src_h_pad), self.p_win, self.c_win)
         # (B*n_prev_tokens, n_patches_h, n_patches_w, p_win, p_win, C)
@@ -201,6 +174,7 @@ class VCTEncoderBandwidth(nn.Module):
             conditional_tokens.append(out_token)
 
         codeword = torch.cat(conditional_tokens, dim=3)
+        # codeword = torch.cat(int_tokens, dim=1)
         codeword = codeword.view(B, n_patches_h, n_patches_w, self.c_win, self.c_win, self.c_out)
         codeword = restore_shape(codeword, (H_out, W_out), self.c_win)
         codeword = torch.split(codeword, [self.feat_dims[1], H_out - self.feat_dims[1]], dim=2)[0]
@@ -332,3 +306,31 @@ class VCTDecoderBandwidth(nn.Module):
 
     def __str__(self):
         return f'VCTBWDecoder({self.c_in},{self.c_feat},{self.c_out},{self.tf_layers},{self.tf_heads},{self.tf_ff},{self.tf_dropout})'
+
+
+class VCTPredictor(nn.Module):
+    def __init__(self, feat_dims, c_win, p_win):
+        super().__init__()
+        c_out = feat_dims[0]
+        self.trg_h_pad, self.trg_w_pad = get_pad(feat_dims[1], feat_dims[2], c_win)
+        self.src_h_pad = [pad + ((p_win - c_win) // 2) for pad in self.trg_h_pad]
+        self.src_w_pad = [pad + ((p_win - c_win) // 2) for pad in self.trg_w_pad]
+        n_patches_h = (feat_dims[1] + sum(self.trg_h_pad)) // c_win
+        n_patches_w = (feat_dims[2] + sum(self.trg_w_pad)) // c_win
+
+        self.quality_predictor = nn.Sequential(
+            nn.Linear(n_patches_h*n_patches_w*c_out, n_patches_h*n_patches_w*c_out),
+            nn.LeakyReLU(),
+            nn.Linear(n_patches_h*n_patches_w*c_out, n_patches_h*n_patches_w*c_out),
+            nn.LeakyReLU(),
+            nn.Linear(n_patches_h*n_patches_w*c_out, 1)
+        )
+
+    def forward(self, conditional_tokens):
+        ipdb.set_trace()
+        B = conditional_tokens[0].size(0)
+        batched_tokens = torch.cat(conditional_tokens, dim=0)
+        prediction = self.quality_predictor(
+            batched_tokens.view(B*len(conditional_tokens), -1)
+        )
+        return prediction
