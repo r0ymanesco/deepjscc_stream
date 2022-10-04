@@ -147,8 +147,6 @@ class VCTEncoderBandwidth(nn.Module):
         n_patches_h, n_patches_w = int_tokens.size(1), int_tokens.size(2)
         int_tokens = int_tokens.view(B*n_patches_h*n_patches_w, -1, self.c_out)
         # (B*n_patches_h*n_patches_w, c_win*c_win, C)
-        int_tokens = torch.chunk(int_tokens, chunks=self.c_win**2, dim=1)
-        # [(B*n_patches_h*n_patches_w, 1, C)] * (c_win*c_win)
 
         sep_input = prev_tokens.view(B*n_prev_tokens*n_patches_h*n_patches_w, -1, self.c_out)
         sep_output = self.tf_encoder_sep(sep_input)
@@ -160,22 +158,12 @@ class VCTEncoderBandwidth(nn.Module):
         # (B*n_patches_h*n_patches_w, n_prev_tokens*p_win*p_win, c_out)
         tf_encoder_out = self.tf_encoder_joint(joint_input)
 
-        trg_in = []
-        conditional_tokens = []
-        for i, token in enumerate(int_tokens):
-            trg_in.append(token)
-            tf_decoder_in = torch.cat(trg_in, dim=1)
-            trg_mask = get_mask(i+1, i+1).to(token.device)
-            tf_decoder_out = self.tf_decoder(tf_decoder_in, tf_encoder_out, tgt_mask=trg_mask)
-            # (B*n_patches_h*n_patches_w, i+1, C)
+        trg_mask = get_mask(self.c_win**2, self.c_win**2).to(int_tokens.device)
+        tf_decoder_out = self.tf_decoder(int_tokens, tf_encoder_out, tgt_mask=trg_mask)
+        conditional_tokens = torch.chunk(tf_decoder_out, chunks=self.c_win**2, dim=1)
 
-            out_token = torch.chunk(tf_decoder_out, chunks=i+1, dim=1)[-1]
-            out_token = out_token.view(B, n_patches_h, n_patches_w, 1, -1)
-            conditional_tokens.append(out_token)
-
-        codeword = torch.cat(conditional_tokens, dim=3)
-        # codeword = torch.cat(int_tokens, dim=1)
-        codeword = codeword.view(B, n_patches_h, n_patches_w, self.c_win, self.c_win, self.c_out)
+        codeword = tf_decoder_out.view(B, n_patches_h, n_patches_w, self.c_win, self.c_win, self.c_out)
+        # codeword = int_tokens.view(B, n_patches_h, n_patches_w, self.c_win, self.c_win, self.c_out)
         codeword = restore_shape(codeword, (H_out, W_out), self.c_win)
         codeword = torch.split(codeword, [self.feat_dims[1], H_out - self.feat_dims[1]], dim=2)[0]
         codeword = torch.split(codeword, [self.feat_dims[2], W_out - self.feat_dims[2]], dim=3)[0]
@@ -251,8 +239,6 @@ class VCTDecoderBandwidth(nn.Module):
         n_patches_h, n_patches_w = int_tokens.size(1), int_tokens.size(2)
         int_tokens = int_tokens.view(B*n_patches_h*n_patches_w, -1, self.c_out)
         # (B*n_patches_h*n_patches_w, c_win*c_win, C)
-        int_tokens = torch.chunk(int_tokens, chunks=self.c_win**2, dim=1)
-        # [(B*n_patches_h*n_patches_w, 1, C)] * (c_win*c_win)
 
         batch_prev_frames = torch.cat(prev_frames, dim=0)
         prev_y = self.auto_feature_encoder(batch_prev_frames)
@@ -269,27 +255,20 @@ class VCTDecoderBandwidth(nn.Module):
         # (B*n_patches_h*n_patches_w, n_prev_tokens*p_win*p_win, c_out)
         tf_encoder_out = self.tf_encoder_joint(joint_input)
 
-        trg_list = []
-        decoded_tokens = []
-        padding_tokens = [torch.zeros_like(int_tokens[0])] * len(int_tokens)
-        for i, token in enumerate(int_tokens):
-            trg_list.append(token)
-            tf_decoder_in = torch.cat(trg_list, dim=1)
-            trg_mask = get_mask(i+1, i+1).to(token.device)
-            tf_decoder_out = self.tf_decoder(tf_decoder_in, tf_encoder_out, tgt_mask=trg_mask)
-            # (B*n_patches_h*n_patches_w, i+1, C)
-            y_next = torch.chunk(tf_decoder_out, chunks=i+1, dim=1)[-1]
-            decoded_tokens.append(y_next)
-
-            padded_tokens = decoded_tokens + padding_tokens[i+1:]
-            curr_y = torch.cat(padded_tokens, dim=1)
-            y_feat = curr_y.view(B, n_patches_h, n_patches_w, self.c_win, self.c_win, self.c_out)
-            y_feat = restore_shape(y_feat, (H_out, W_out), self.c_win)
-            y_feat = torch.split(y_feat, [self.feat_dims[1], H_out - self.feat_dims[1]], dim=2)[0]
-            y_feat = torch.split(y_feat, [self.feat_dims[2], W_out - self.feat_dims[2]], dim=3)[0]
-            frame = self.feature_decoder(y_feat)
-            frame_at_rate.append(torch.sigmoid(frame))
-            # NOTE this list contains a single frame decoded at different bw usages (n tokens)
+        padding_tokens = [torch.zeros_like(int_tokens[:, :1, :])] * (self.c_win**2)
+        trg_mask = get_mask(self.c_win**2, self.c_win**2).to(int_tokens.device)
+        tf_decoder_out = self.tf_decoder(int_tokens, tf_encoder_out, tgt_mask=trg_mask)
+        decoded_tokens = list(torch.chunk(tf_decoder_out, chunks=self.c_win**2, dim=1))
+        padded_tokens = [torch.cat(decoded_tokens[:i+1] + padding_tokens[:(self.c_win**2-i-1)], dim=1)
+                         for i in range(self.c_win**2)]
+        all_y_feat = torch.stack(padded_tokens, dim=0)
+        y_feat = all_y_feat.view(B*(self.c_win**2), n_patches_h, n_patches_w, self.c_win, self.c_win, self.c_out)
+        y_feat = restore_shape(y_feat, (H_out, W_out), self.c_win)
+        y_feat = torch.split(y_feat, [self.feat_dims[1], H_out - self.feat_dims[1]], dim=2)[0]
+        y_feat = torch.split(y_feat, [self.feat_dims[2], W_out - self.feat_dims[2]], dim=3)[0]
+        frames = torch.sigmoid(self.feature_decoder(y_feat))
+        frame_at_rate = torch.chunk(frames, chunks=self.c_win**2, dim=0)
+        # NOTE this list contains a single frame decoded at different bw usages (n tokens)
 
         return frame_at_rate, {}
 

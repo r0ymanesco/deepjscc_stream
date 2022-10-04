@@ -312,7 +312,7 @@ class VCTRecursiveCoding(BaseTrainer):
         }, f'{self.save_dir}/{self.job_name}.pth')
 
     def load_weights(self):
-        cp = torch.load(f'{self.save_dir}/{self.job_name}.pth')
+        cp = torch.load(f'{self.save_dir}/{self.job_name}.pth', map_location='cpu')
         self.encoder.load_state_dict(cp['encoder'])
         self.decoder.load_state_dict(cp['decoder'])
         self.modem.load_state_dict(cp['modem'])

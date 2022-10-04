@@ -105,10 +105,27 @@ def calc_loss(prediction, target, loss, reduction='mean'):
 
     match loss:
         case 'l2':
-            loss = F.mse_loss(prediction, target, reduction=reduction)
+            loss = F.mse_loss(prediction, target, reduction='none')
+            match reduction:
+                case 'mean':
+                    loss = loss.mean()
+                case 'batch':
+                    loss = torch.mean(loss, dim=(4, 3, 2))
+                case _:
+                    raise NotImplementedError
         case 'msssim':
+            shape = prediction.size()
+            assert len(shape) <= 5
+            if len(shape) == 5:
+                prediction = prediction.view(-1, shape[2], shape[3], shape[4])
+                target = target.view(-1, shape[2], shape[3], shape[4])
+
+            avg = False
+            if reduction == 'mean': avg = True
             loss = 1 - ms_ssim(prediction, target,
-                               data_range=1, size_average=True)
+                               data_range=1, size_average=avg)
+            if not avg:
+                loss = loss.view(-1, shape[1])
         case _:
             raise NotImplementedError
     return loss, loss_aux

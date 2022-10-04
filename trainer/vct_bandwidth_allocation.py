@@ -23,7 +23,7 @@ from utils import get_dataloader, get_optimizer, get_scheduler
 
 class VCTBandwidthAllocation(BaseTrainer):
     def __init__(self, dataset, loss, params, resume=False):
-        super().__init__('VCTBandwidthAllocation', dataset, loss, resume, params.device)
+        super().__init__('VCTBWAllocation', dataset, loss, resume, params.device)
 
         self.epoch = 0
         self.params = params
@@ -139,10 +139,10 @@ class VCTBandwidthAllocation(BaseTrainer):
 
     def _get_gop_struct(self, n_frames):
         if self._training:
-            # gop_len = np.random.randint(3, 10)
             gop_len = 3
         else:
             gop_len = 3
+        # FIXME consider more reference frames
         return np.arange(0, n_frames+1, 1), gop_len
 
     def __call__(self, snr, *args, **kwargs):
@@ -151,6 +151,10 @@ class VCTBandwidthAllocation(BaseTrainer):
         loss_hist = []
         psnr_hist = []
         msssim_hist = []
+
+        top_rate_loss_hist = []
+        top_rate_psnr_hist = []
+        top_rate_msssim_hist = []
 
         with tqdm(self.loader, unit='batch') as tepoch:
             for batch_idx, (frames, vid_fns) in enumerate(tepoch):
@@ -161,6 +165,10 @@ class VCTBandwidthAllocation(BaseTrainer):
                 batch_loss = []
                 batch_psnr = []
                 batch_msssim = []
+
+                top_rate_loss = []
+                top_rate_psnr = []
+                top_rate_msssim = []
 
                 n_frames = frames.size(1) // 3
                 frames = list(torch.chunk(frames.to(self.device), chunks=n_frames, dim=1))
@@ -185,12 +193,14 @@ class VCTBandwidthAllocation(BaseTrainer):
                     predictions = torch.stack(frame_at_rate, dim=1)
                     target = torch.stack([target_frame]*len(frame_at_rate), dim=1)
 
-                    dist_loss, _ = calc_loss(predictions, target, self.loss, 'none')
-                    rate_dist_loss = torch.mean(dist_loss, dim=(4, 3, 2))
-                    dist_loss_mean = torch.mean(dist_loss)
+                    rate_dist_loss, _ = calc_loss(predictions, target, self.loss, 'batch')
+                    dist_loss_mean = torch.mean(rate_dist_loss)
                     batch_loss.append(dist_loss_mean.item())
+                    top_rate_loss.append(rate_dist_loss[:, -1].mean().item())
 
                     # NOTE use a random frame at rate for reference
+                    # FIXME in fine tuning stage, use the correct reconstruction
+                    # can move this part into the cases
                     rand_i = np.random.randint(len(frame_at_rate))
                     random_ref = frame_at_rate[rand_i]
                     decoder_ref = [decoder_ref[(i + 1) % len(decoder_ref)]
@@ -202,6 +212,9 @@ class VCTBandwidthAllocation(BaseTrainer):
                             loss = dist_loss_mean
                         case 'prediction':
                             q_pred = self.predictor(encoder_aux['conditional_tokens'])
+                            # FIXME add fine tuning stage using predictor to allocate
+                            # param for target quality
+                            # train all modules
                             loss = F.mse_loss(q_pred, rate_dist_loss)
                         case _:
                             raise ValueError
@@ -213,20 +226,29 @@ class VCTBandwidthAllocation(BaseTrainer):
                     else:
                         frame_psnr = calc_psnr(frame_at_rate, [target_frame]*len(frame_at_rate))
                         batch_psnr.extend(frame_psnr)
+                        top_rate_psnr.append(frame_psnr[-1])
+                        # NOTE the top rate val is still affected by chosen ref frame
 
                         frame_msssim = calc_msssim(frame_at_rate, [target_frame]*len(frame_at_rate))
                         batch_msssim.extend(frame_msssim)
+                        top_rate_msssim.append(frame_msssim[-1])
 
                 loss_hist.append(np.nanmean(batch_loss))
-                epoch_postfix[f'{self.loss} loss'] = '{:.5f}'.format(np.nanmean(batch_loss))
+                top_rate_loss_hist.append(np.nanmean(top_rate_loss))
+                epoch_postfix[f'{self.loss} loss/top_r'] = '{:.5f}/{:.5f}'.format(loss_hist[-1], top_rate_loss_hist[-1])
+
                 if not self._training:
                     psnr_hist.extend(batch_psnr)
                     batch_psnr_mean = np.nanmean(batch_psnr)
-                    epoch_postfix['psnr'] = '{:.5f}'.format(batch_psnr_mean)
+                    top_rate_psnr_hist.extend(top_rate_psnr)
+                    top_rate_psnr_mean = np.nanmean(top_rate_psnr)
+                    epoch_postfix['psnr/top_r'] = '{:.5f}/{:.5f}'.format(batch_psnr_mean, top_rate_psnr_mean)
 
                     msssim_hist.extend(batch_msssim)
                     batch_msssim_mean = np.nanmean(msssim_hist)
-                    epoch_postfix['msssim'] = '{:.5f}'.format(batch_msssim_mean)
+                    top_rate_msssim_hist.extend(top_rate_msssim)
+                    top_rate_msssim_mean = np.nanmean(top_rate_msssim)
+                    epoch_postfix['msssim/top_r'] = '{:.5f}/{:.5f}'.format(batch_msssim_mean, top_rate_msssim_mean)
 
                 tepoch.set_postfix(**epoch_postfix)
 
@@ -241,10 +263,15 @@ class VCTBandwidthAllocation(BaseTrainer):
                 msssim_mean = np.nanmean(msssim_hist)
                 msssim_std = np.sqrt(np.var(msssim_hist))
 
+                top_rate_psnr_mean = np.nanmean(top_rate_psnr_hist)
+                top_rate_msssim_mean = np.nanmean(top_rate_msssim_hist)
+
                 if self._validate:
                     return_aux = {
                         'psnr_mean': psnr_mean,
-                        'msssim_mean': msssim_mean
+                        'top_r_psnr_mean': top_rate_psnr_mean,
+                        'msssim_mean': msssim_mean,
+                        'top_r_msssim_mean': top_rate_msssim_mean,
                     }
 
                     terminate, save, update_scheduler = self._update_es(loss_mean)
@@ -263,7 +290,7 @@ class VCTBandwidthAllocation(BaseTrainer):
                         'psnr_mean': psnr_mean,
                         'psnr_std': psnr_std,
                         'msssim_mean': msssim_mean,
-                        'msssim_std': msssim_std
+                        'msssim_std': msssim_std,
                     }
 
             self.reset()
@@ -275,7 +302,15 @@ class VCTBandwidthAllocation(BaseTrainer):
 
         flag, best_loss, best_epoch, bad_epochs = self.es.step(torch.Tensor([loss]), self.epoch)
         if flag:
-            print('ES criterion met; loading best weights from epoch {}'.format(best_epoch))
+            match self.stage:
+                case 'coding':
+                    flag = False
+                    self.load_weights()
+
+                    self.stage = 'prediction'
+                    self.es.reset()
+                case _:
+                    print('ES criterion met; loading best weights from epoch {}'.format(best_epoch))
         else:
             if bad_epochs == 0:
                 save_nets = True
@@ -340,6 +375,7 @@ class VCTBandwidthAllocation(BaseTrainer):
             os.makedirs(self.save_dir)
 
         torch.save({
+            'stage': self.stage,
             'encoder': self.encoder.state_dict(),
             'decoder': self.decoder.state_dict(),
             'modem': self.modem.state_dict(),
@@ -350,10 +386,11 @@ class VCTBandwidthAllocation(BaseTrainer):
             'predictor_scheduler': self.predictor_scheduler.state_dict(),
             'es': self.es.state_dict(),
             'epoch': self.epoch
-        }, f'{self.save_dir}/{self.job_name}.pth')
+        }, '{}/{}.pth'.format(self.save_dir, self.job_name))
 
     def load_weights(self):
-        cp = torch.load(f'{self.save_dir}/{self.job_name}.pth')
+        cp = torch.load('{}/{}.pth'.format(self.save_dir, self.job_name), map_location='cpu')
+        self.stage = cp['stage']
         self.encoder.load_state_dict(cp['encoder'])
         self.decoder.load_state_dict(cp['decoder'])
         self.modem.load_state_dict(cp['modem'])

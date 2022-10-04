@@ -108,7 +108,6 @@ class VCTRecursiveEncoder(nn.Module):
     def _joint_train(self, gop):
         B = gop[0].size(0)
 
-        # TODO do channel emulation
         # the frames in batch_int_frames should be expected reconstruction
         batch_int_frames = torch.cat(gop, dim=0)
         batch_y = self.feature_encoder(batch_int_frames)
