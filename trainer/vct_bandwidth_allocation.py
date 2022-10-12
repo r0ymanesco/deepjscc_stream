@@ -36,6 +36,7 @@ class VCTBandwidthAllocation(BaseTrainer):
         self.fine_tune_loss_lmda = params.optimizer.fine_tune_loss_lmda
 
         self._get_config(params)
+        self.ch_uses_per_token = self.predictor.ch_uses_per_token
 
     def _get_config(self, params):
         self.job_name = f'{self.trainer}({self.loss},{self.coding_stage})'
@@ -43,6 +44,7 @@ class VCTBandwidthAllocation(BaseTrainer):
         (self.train_loader,
          self.val_loader,
          self.eval_loader), dataset_aux = self._get_data(params.dataset)
+        self.frame_dim = np.prod(dataset_aux['frame_sizes'])
 
         self.encoder, self.decoder, self.predictor = self._get_encoder(
             params.encoder, dataset_aux['frame_sizes'], dataset_aux['reduced_arch'])
@@ -165,6 +167,7 @@ class VCTBandwidthAllocation(BaseTrainer):
             'top_rate_loss_hist': [],
             'top_rate_psnr_hist': [],
             'top_rate_msssim_hist': [],
+            'rate_hist': [],
         }
 
         with tqdm(self.loader, unit='batch') as tepoch:
@@ -180,6 +183,7 @@ class VCTBandwidthAllocation(BaseTrainer):
                     'top_rate_loss': [],
                     'top_rate_psnr': [],
                     'top_rate_msssim': [],
+                    'batch_rate': [],
                 }
 
                 n_frames = frames.size(1) // 3
@@ -277,10 +281,14 @@ class VCTBandwidthAllocation(BaseTrainer):
                     msssim_mean = np.nanmean(epoch_trackers['msssim_hist'])
                     msssim_std = np.sqrt(np.var(epoch_trackers['msssim_hist']))
 
+                    rate_mean = np.nanmean(epoch_trackers['rate_hist'])
+                    rate_std = np.sqrt(np.var(epoch_trackers['rate_hist']))
+
                     if self._validate:
                         return_aux = {
                             'psnr_mean': psnr_mean,
                             'msssim_mean': msssim_mean,
+                            'rate_mean': rate_mean,
                         }
 
                     elif self._evaluate:
@@ -289,6 +297,8 @@ class VCTBandwidthAllocation(BaseTrainer):
                             'psnr_std': psnr_std,
                             'msssim_mean': msssim_mean,
                             'msssim_std': msssim_std,
+                            'rate_mean': rate_mean,
+                            'rate_std': rate_std,
                         }
             case _:
                 raise ValueError
@@ -327,6 +337,10 @@ class VCTBandwidthAllocation(BaseTrainer):
                     epoch_trackers['msssim_hist'].extend(batch_trackers['batch_msssim'])
                     batch_msssim_mean = np.nanmean(batch_trackers['batch_msssim'])
                     epoch_postfix['msssim'] = '{:.5f}'.format(batch_msssim_mean)
+
+                    epoch_trackers['rate_hist'].extend(batch_trackers['batch_rate'])
+                    batch_rate_mean = np.nanmean(batch_trackers['batch_rate'])
+                    epoch_postfix['rate'] = '{:.5f}'.format(batch_rate_mean)
             case _:
                 raise ValueError
         return epoch_trackers, epoch_postfix
@@ -402,6 +416,9 @@ class VCTBandwidthAllocation(BaseTrainer):
 
                     frame_msssim = calc_msssim(predicted_frames, target_frames)
                     batch_trackers['batch_msssim'].extend(frame_msssim)
+
+                    batch_avg_rate = (batch_rate_indices.mean() * self.ch_uses_per_token) / self.frame_dim
+                    batch_trackers['batch_rate'].append(batch_avg_rate.item())
             case _:
                 raise ValueError
 
