@@ -16,6 +16,7 @@ from modules.channel import Channel
 from modules.scheduler import EarlyStopping
 from modules.feature_encoder import FeatureEncoder
 from modules.vct_encoding_bandwidth import VCTEncoderBandwidth, VCTDecoderBandwidth, VCTPredictor
+from modules.vct_encoding_bandwidth import get_rate_index
 
 from utils import calc_loss, calc_msssim, calc_psnr
 from utils import get_dataloader, get_optimizer, get_scheduler
@@ -29,12 +30,15 @@ class VCTBandwidthAllocation(BaseTrainer):
         self.params = params
         self.save_dir = params.save_dir
 
-        self.coding_stages = params.coding_stages
+        self.coding_stage = params.coding_stage
+        self.predictor_stage = params.predictor_stage
+        self.target_quality = params.encoder.target_quality
+        self.fine_tune_loss_lmda = params.optimizer.fine_tune_loss_lmda
 
         self._get_config(params)
 
     def _get_config(self, params):
-        self.job_name = f'{self.trainer}({self.loss},{self.coding_stages})'
+        self.job_name = f'{self.trainer}({self.loss},{self.coding_stage})'
 
         (self.train_loader,
          self.val_loader,
@@ -47,14 +51,16 @@ class VCTBandwidthAllocation(BaseTrainer):
 
         self.channel = self._get_channel(params.channel)
 
-        coding_modules = (self.encoder, self.decoder, self.modem, self.channel)
-        predictor_modules = (self.predictor,)
+        coding_modules = [self.encoder, self.decoder, self.modem, self.channel]
+        predictor_modules = [self.predictor,]
         self.coding_optimizer, optimizer_aux = get_optimizer(params.optimizer, coding_modules)
         self.predictor_optimizer, _ = get_optimizer(params.optimizer, predictor_modules)
+        self.fine_tune_optimizer, _ = get_optimizer(params.optimizer, coding_modules + predictor_modules)
         self.job_name += '_' + optimizer_aux['str']
 
         self.coding_scheduler, scheduler_aux = get_scheduler(self.coding_optimizer, params.scheduler)
         self.predictor_scheduler, _ = get_scheduler(self.predictor_optimizer, params.scheduler)
+        self.fine_tune_scheduler, _ = get_scheduler(self.fine_tune_optimizer, params.scheduler)
         self.job_name += '_' + scheduler_aux['str']
 
         self.es = EarlyStopping(mode=params.early_stop.mode,
@@ -68,6 +74,9 @@ class VCTBandwidthAllocation(BaseTrainer):
         if len(params.comments) != 0: self.job_name += f'_Ref({params.comments})'
 
         if self.resume: self.load_weights()
+        self.stage = 'prediction'
+        self.predictor_stage = self.epoch + (self.predictor_stage - self.coding_stage)
+        self.coding_stage = self.epoch
 
     def _get_data(self, params):
         (train_loader, val_loader, eval_loader), dataset_aux = get_dataloader(params.dataset, params)
@@ -120,6 +129,7 @@ class VCTBandwidthAllocation(BaseTrainer):
             tf_dropout=params.tf_dropout
         ).to(self.device)
         predictor = VCTPredictor(
+            loss=self.loss,
             feat_dims=feat_dims,
             c_win=params.c_win,
             p_win=params.p_win
@@ -148,13 +158,14 @@ class VCTBandwidthAllocation(BaseTrainer):
     def __call__(self, snr, *args, **kwargs):
         self.check_mode_set()
 
-        loss_hist = []
-        psnr_hist = []
-        msssim_hist = []
-
-        top_rate_loss_hist = []
-        top_rate_psnr_hist = []
-        top_rate_msssim_hist = []
+        epoch_trackers = {
+            'loss_hist': [],
+            'psnr_hist': [],
+            'msssim_hist': [],
+            'top_rate_loss_hist': [],
+            'top_rate_psnr_hist': [],
+            'top_rate_msssim_hist': [],
+        }
 
         with tqdm(self.loader, unit='batch') as tepoch:
             for batch_idx, (frames, vid_fns) in enumerate(tepoch):
@@ -162,13 +173,14 @@ class VCTBandwidthAllocation(BaseTrainer):
                 tepoch.set_description(pbar_desc)
 
                 epoch_postfix = OrderedDict()
-                batch_loss = []
-                batch_psnr = []
-                batch_msssim = []
-
-                top_rate_loss = []
-                top_rate_psnr = []
-                top_rate_msssim = []
+                batch_trackers = {
+                    'batch_loss': [],
+                    'batch_psnr': [],
+                    'batch_msssim': [],
+                    'top_rate_loss': [],
+                    'top_rate_psnr': [],
+                    'top_rate_msssim': [],
+                }
 
                 n_frames = frames.size(1) // 3
                 frames = list(torch.chunk(frames.to(self.device), chunks=n_frames, dim=1))
@@ -190,111 +202,213 @@ class VCTBandwidthAllocation(BaseTrainer):
                     demod_symbols = self.modem.demodulate(rx_symbols)
 
                     frame_at_rate, _ = self.decoder(demod_symbols, decoder_ref, self.stage)
-                    predictions = torch.stack(frame_at_rate, dim=1)
-                    target = torch.stack([target_frame]*len(frame_at_rate), dim=1)
 
-                    rate_dist_loss, _ = calc_loss(predictions, target, self.loss, 'batch')
-                    dist_loss_mean = torch.mean(rate_dist_loss)
-                    batch_loss.append(dist_loss_mean.item())
-                    top_rate_loss.append(rate_dist_loss[:, -1].mean().item())
-
-                    # NOTE use a random frame at rate for reference
-                    # FIXME in fine tuning stage, use the correct reconstruction
-                    # can move this part into the cases
-                    rand_i = np.random.randint(len(frame_at_rate))
-                    random_ref = frame_at_rate[rand_i]
-                    decoder_ref = [decoder_ref[(i + 1) % len(decoder_ref)]
-                                   for i, _ in enumerate(decoder_ref)]
-                    decoder_ref[-1] = random_ref.detach()
-
-                    match self.stage:
-                        case 'coding':
-                            loss = dist_loss_mean
-                        case 'prediction':
-                            q_pred = self.predictor(encoder_aux['conditional_tokens'])
-                            # FIXME add fine tuning stage using predictor to allocate
-                            # param for target quality
-                            # train all modules
-                            loss = F.mse_loss(q_pred, rate_dist_loss)
-                        case _:
-                            raise ValueError
+                    (loss, decoder_ref, batch_trackers) = self._get_loss(frame_at_rate, target_frame,
+                                                                         decoder_ref, encoder_aux,
+                                                                         batch_trackers)
 
                     if self._training:
                         self.optimizer.zero_grad()
                         loss.backward()
                         self.optimizer.step()
-                    else:
-                        frame_psnr = calc_psnr(frame_at_rate, [target_frame]*len(frame_at_rate))
-                        batch_psnr.extend(frame_psnr)
-                        top_rate_psnr.append(frame_psnr[-1])
-                        # NOTE the top rate val is still affected by chosen ref frame
 
-                        frame_msssim = calc_msssim(frame_at_rate, [target_frame]*len(frame_at_rate))
-                        batch_msssim.extend(frame_msssim)
-                        top_rate_msssim.append(frame_msssim[-1])
-
-                loss_hist.append(np.nanmean(batch_loss))
-                top_rate_loss_hist.append(np.nanmean(top_rate_loss))
-                epoch_postfix[f'{self.loss} loss/top_r'] = '{:.5f}/{:.5f}'.format(loss_hist[-1], top_rate_loss_hist[-1])
-
-                if not self._training:
-                    psnr_hist.extend(batch_psnr)
-                    batch_psnr_mean = np.nanmean(batch_psnr)
-                    top_rate_psnr_hist.extend(top_rate_psnr)
-                    top_rate_psnr_mean = np.nanmean(top_rate_psnr)
-                    epoch_postfix['psnr/top_r'] = '{:.5f}/{:.5f}'.format(batch_psnr_mean, top_rate_psnr_mean)
-
-                    msssim_hist.extend(batch_msssim)
-                    batch_msssim_mean = np.nanmean(msssim_hist)
-                    top_rate_msssim_hist.extend(top_rate_msssim)
-                    top_rate_msssim_mean = np.nanmean(top_rate_msssim)
-                    epoch_postfix['msssim/top_r'] = '{:.5f}/{:.5f}'.format(batch_msssim_mean, top_rate_msssim_mean)
-
+                epoch_trackers, epoch_postfix = self._update_epoch_postfix(batch_trackers,
+                                                                           epoch_trackers,
+                                                                           epoch_postfix)
                 tepoch.set_postfix(**epoch_postfix)
 
-            loss_mean = np.nanmean(loss_hist)
+            loss_mean, return_aux = self._get_return_aux(epoch_trackers)
 
             terminate = False
-            return_aux = {}
-            if not self._training:
-                psnr_mean = np.nanmean(psnr_hist)
-                psnr_std = np.sqrt(np.var(psnr_hist))
-
-                msssim_mean = np.nanmean(msssim_hist)
-                msssim_std = np.sqrt(np.var(msssim_hist))
-
-                top_rate_psnr_mean = np.nanmean(top_rate_psnr_hist)
-                top_rate_msssim_mean = np.nanmean(top_rate_msssim_hist)
-
-                if self._validate:
-                    return_aux = {
-                        'psnr_mean': psnr_mean,
-                        'top_r_psnr_mean': top_rate_psnr_mean,
-                        'msssim_mean': msssim_mean,
-                        'top_r_msssim_mean': top_rate_msssim_mean,
-                    }
-
-                    terminate, save, update_scheduler = self._update_es(loss_mean)
-                    if terminate:
-                        self.load_weights()
-                    elif save:
-                        self.save_weights()
-                        print('Saving best weights')
-                    elif update_scheduler:
-                        self.lr_scheduler.step()
-                        print('lr updated: {:.7f}'.format(self.lr_scheduler.get_last_lr()[0]))
-
-                elif self._evaluate:
-                    terminate = False
-                    return_aux = {
-                        'psnr_mean': psnr_mean,
-                        'psnr_std': psnr_std,
-                        'msssim_mean': msssim_mean,
-                        'msssim_std': msssim_std,
-                    }
+            if self._validate:
+                terminate, save, update_scheduler = self._update_es(loss_mean)
+                if terminate:
+                    self.load_weights()
+                elif save:
+                    self.save_weights()
+                    print('Saving best weights')
+                elif update_scheduler:
+                    self.lr_scheduler.step()
+                    print('lr updated: {:.7f}'.format(self.lr_scheduler.get_last_lr()[0]))
 
             self.reset()
         return loss_mean, terminate, return_aux
+
+    def _get_return_aux(self, epoch_trackers):
+        return_aux = {}
+        match self.stage:
+            case 'coding':
+                loss_mean = np.nanmean(epoch_trackers['loss_hist'])
+
+                if not self._training:
+                    psnr_mean = np.nanmean(epoch_trackers['psnr_hist'])
+                    psnr_std = np.sqrt(np.var(epoch_trackers['psnr_hist']))
+
+                    msssim_mean = np.nanmean(epoch_trackers['msssim_hist'])
+                    msssim_std = np.sqrt(np.var(epoch_trackers['msssim_hist']))
+
+                    top_rate_psnr_mean = np.nanmean(epoch_trackers['top_rate_psnr_hist'])
+                    top_rate_msssim_mean = np.nanmean(epoch_trackers['top_rate_msssim_hist'])
+
+                    if self._validate:
+                        return_aux = {
+                            'psnr_mean': psnr_mean,
+                            'top_r_psnr_mean': top_rate_psnr_mean,
+                            'msssim_mean': msssim_mean,
+                            'top_r_msssim_mean': top_rate_msssim_mean,
+                        }
+
+                    elif self._evaluate:
+                        return_aux = {
+                            'psnr_mean': psnr_mean,
+                            'psnr_std': psnr_std,
+                            'msssim_mean': msssim_mean,
+                            'msssim_std': msssim_std,
+                        }
+            case 'prediction':
+                loss_mean = np.nanmean(epoch_trackers['loss_hist'])
+            case 'fine_tune':
+                loss_mean = np.nanmean(epoch_trackers['loss_hist'])
+
+                if not self._training:
+                    psnr_mean = np.nanmean(epoch_trackers['psnr_hist'])
+                    psnr_std = np.sqrt(np.var(epoch_trackers['psnr_hist']))
+
+                    msssim_mean = np.nanmean(epoch_trackers['msssim_hist'])
+                    msssim_std = np.sqrt(np.var(epoch_trackers['msssim_hist']))
+
+                    if self._validate:
+                        return_aux = {
+                            'psnr_mean': psnr_mean,
+                            'msssim_mean': msssim_mean,
+                        }
+
+                    elif self._evaluate:
+                        return_aux = {
+                            'psnr_mean': psnr_mean,
+                            'psnr_std': psnr_std,
+                            'msssim_mean': msssim_mean,
+                            'msssim_std': msssim_std,
+                        }
+            case _:
+                raise ValueError
+        return loss_mean, return_aux
+
+    def _update_epoch_postfix(self, batch_trackers, epoch_trackers, epoch_postfix):
+        match self.stage:
+            case 'coding':
+                epoch_trackers['loss_hist'].append(np.nanmean(batch_trackers['batch_loss']))
+                epoch_trackers['top_rate_loss_hist'].append(np.nanmean(batch_trackers['top_rate_loss']))
+                epoch_postfix[f'{self.loss} loss/top_r'] = '{:.5f}/{:.5f}'.format(epoch_trackers['loss_hist'][-1],
+                                                                                  epoch_trackers['top_rate_loss_hist'][-1])
+                if not self._training:
+                    epoch_trackers['psnr_hist'].extend(batch_trackers['batch_psnr'])
+                    batch_psnr_mean = np.nanmean(batch_trackers['batch_psnr'])
+                    epoch_trackers['top_rate_psnr_hist'].extend(batch_trackers['top_rate_psnr'])
+                    top_rate_psnr_mean = np.nanmean(batch_trackers['top_rate_psnr'])
+                    epoch_postfix['psnr/top_r'] = '{:.5f}/{:.5f}'.format(batch_psnr_mean, top_rate_psnr_mean)
+
+                    epoch_trackers['msssim_hist'].extend(batch_trackers['batch_msssim'])
+                    batch_msssim_mean = np.nanmean(batch_trackers['batch_msssim'])
+                    epoch_trackers['top_rate_msssim_hist'].extend(batch_trackers['top_rate_msssim'])
+                    top_rate_msssim_mean = np.nanmean(batch_trackers['top_rate_msssim'])
+                    epoch_postfix['msssim/top_r'] = '{:.5f}/{:.5f}'.format(batch_msssim_mean, top_rate_msssim_mean)
+            case 'prediction':
+                epoch_trackers['loss_hist'].append(np.nanmean(batch_trackers['batch_loss']))
+                epoch_postfix[f'prediction loss'] = '{:.5f}'.format(epoch_trackers['loss_hist'][-1])
+            case 'fine_tune':
+                epoch_trackers['loss_hist'].append(np.nanmean(batch_trackers['batch_loss']))
+                epoch_postfix[f'{self.loss} loss'] = '{:.5f}'.format(epoch_trackers['loss_hist'][-1])
+                if not self._training:
+                    epoch_trackers['psnr_hist'].extend(batch_trackers['batch_psnr'])
+                    batch_psnr_mean = np.nanmean(batch_trackers['batch_psnr'])
+                    epoch_postfix['psnr'] = '{:.5f}'.format(batch_psnr_mean)
+
+                    epoch_trackers['msssim_hist'].extend(batch_trackers['batch_msssim'])
+                    batch_msssim_mean = np.nanmean(batch_trackers['batch_msssim'])
+                    epoch_postfix['msssim'] = '{:.5f}'.format(batch_msssim_mean)
+            case _:
+                raise ValueError
+        return epoch_trackers, epoch_postfix
+
+    def _get_loss(self, frame_at_rate, target_frame, decoder_ref, encoder_aux, batch_trackers):
+        predictions = torch.stack(frame_at_rate, dim=1)
+        target = torch.stack([target_frame]*len(frame_at_rate), dim=1)
+
+        match self.stage:
+            case 'coding':
+                # NOTE use a random frame at rate for reference during separate training
+                # same in prediction stage
+                # Doing this can potentially affect the training loss since the
+                # initial reconstructions are poor but the gradients are detached
+
+                rate_dist_loss, _ = calc_loss(predictions, target, self.loss, 'batch')
+                dist_loss_mean = torch.mean(rate_dist_loss)
+
+                batch_trackers['batch_loss'].append(dist_loss_mean.item())
+                batch_trackers['top_rate_loss'].append(rate_dist_loss[:, -1].mean().item())
+
+                rand_i = np.random.randint(len(frame_at_rate))
+                random_ref = frame_at_rate[rand_i]
+                next_ref_frame = random_ref.detach()
+
+                predicted_frames = frame_at_rate
+                target_frames = [target_frame] * len(frame_at_rate)
+
+                loss = dist_loss_mean
+
+                if not self._training:
+                    frame_psnr = calc_psnr(predicted_frames, target_frames)
+                    batch_trackers['batch_psnr'].extend(frame_psnr)
+                    batch_trackers['top_rate_psnr'].extend(calc_psnr([frame_at_rate[-1]], [target_frame]))
+                    # NOTE the top rate val is still affected by chosen ref frame
+
+                    frame_msssim = calc_msssim(predicted_frames, target_frames)
+                    batch_trackers['batch_msssim'].extend(frame_msssim)
+                    batch_trackers['top_rate_msssim'].extend(calc_msssim([frame_at_rate[-1]], [target_frame]))
+            case 'prediction':
+                rate_dist_loss, _ = calc_loss(predictions, target, self.loss, 'batch')
+                dist_loss_mean = torch.mean(rate_dist_loss)
+
+                rand_i = np.random.randint(len(frame_at_rate))
+                random_ref = frame_at_rate[rand_i]
+                next_ref_frame = random_ref.detach()
+
+                q_pred, _ = self.predictor(encoder_aux['conditional_tokens'])
+                loss = F.mse_loss(q_pred, rate_dist_loss)
+                batch_trackers['batch_loss'].append(loss.item())
+            case 'fine_tune':
+                # FIXME channel codeword in this phase should include codewords from future frames,
+                # this ensures the power normalisation is fair
+
+                rate_dist_loss, _ = calc_loss(predictions, target, self.loss, 'batch')
+                q_pred, q_pred_scaled = self.predictor(encoder_aux['conditional_tokens'])
+                (rate_indices,
+                target_rate_frames) = get_rate_index(q_pred_scaled, self.target_quality, frame_at_rate)
+                next_ref_frame = target_rate_frames.detach()
+
+                predicted_frames = [target_rate_frames]
+                target_frames = [target_frame]
+
+                batch_rate_indices = torch.stack(rate_indices, dim=0)
+                dist_loss_at_rate = torch.gather(rate_dist_loss, 1, batch_rate_indices)
+                pred_loss = F.mse_loss(q_pred, rate_dist_loss)
+                loss = dist_loss_at_rate.mean() + self.fine_tune_loss_lmda * pred_loss
+                batch_trackers['batch_loss'].append(loss.item())
+
+                if not self._training:
+                    frame_psnr = calc_psnr(predicted_frames, target_frames)
+                    batch_trackers['batch_psnr'].extend(frame_psnr)
+
+                    frame_msssim = calc_msssim(predicted_frames, target_frames)
+                    batch_trackers['batch_msssim'].extend(frame_msssim)
+            case _:
+                raise ValueError
+
+        decoder_ref = [decoder_ref[(i + 1) % len(decoder_ref)]
+                        for i, _ in enumerate(decoder_ref)]
+        decoder_ref[-1] = next_ref_frame
+        return loss, decoder_ref, batch_trackers
 
     def _update_es(self, loss):
         save_nets = False
@@ -351,23 +465,27 @@ class VCTBandwidthAllocation(BaseTrainer):
         self._set_stage()
 
     def _set_stage(self):
-        if self.epoch <= self.coding_stages:
+        if self.epoch <= self.coding_stage:
             self.stage = 'coding'
             self.optimizer = self.coding_optimizer
             self.lr_scheduler = self.coding_scheduler
 
             self.predictor.eval()
-        else:
+        elif self.epoch <= self.predictor_stage:
             self.stage = 'prediction'
             self.optimizer = self.predictor_optimizer
             self.lr_scheduler = self.predictor_scheduler
+            if self.epoch == self.coding_stage+1: self.es.reset()
 
             self.encoder.eval()
             self.decoder.eval()
             self.modem.eval()
             self.channel.eval()
-
-        if self.epoch == self.coding_stages+1: self.es.reset()
+        else:
+            self.stage = 'fine_tune'
+            self.optimizer = self.fine_tune_optimizer
+            self.lr_scheduler = self.fine_tune_scheduler
+            if self.epoch == self.predictor_stage+1: self.es.reset()
 
     def save_weights(self):
         if not os.path.exists(self.save_dir):
@@ -406,7 +524,8 @@ class VCTBandwidthAllocation(BaseTrainer):
     @staticmethod
     def get_parser(parser):
         parser.add_argument('--save_dir', type=str, help='directory to save checkpoints')
-        parser.add_argument('--coding_stages', type=int, help='feature stage training epochs')
+        parser.add_argument('--coding_stage', type=int, help='feature stage training epochs')
+        parser.add_argument('--predictor_stage', type=int, help='predictor stage training epochs')
 
         parser.add_argument('--dataset.dataset', type=str, help='dataset: dataset to use')
         parser.add_argument('--dataset.path', type=str, help='dataset: path to dataset')
@@ -416,6 +535,7 @@ class VCTBandwidthAllocation(BaseTrainer):
 
         parser.add_argument('--optimizer.solver', type=str, help='optimizer: optimizer to use')
         parser.add_argument('--optimizer.lr', type=float, help='optimizer: optimizer learning rate')
+        parser.add_argument('--optimizer.fine_tune_loss_lmda', type=float, help='optimizer: fine tuning loss combination coefficient')
 
         parser.add_argument('--optimizer.lookahead', action='store_true', help='optimizer: to use lookahead')
         parser.add_argument('--optimizer.lookahead_alpha', type=float, help='optimizer: lookahead alpha')
@@ -424,6 +544,7 @@ class VCTBandwidthAllocation(BaseTrainer):
         parser.add_argument('--scheduler.scheduler', type=str, help='scheduler: scheduler to use')
         parser.add_argument('--scheduler.lr_schedule_factor', type=float, help='scheduler: multi_lr: reduction factor')
 
+        parser.add_argument('--encoder.target_quality', type=float, help='encoder: target frame quality (defined by train loss)')
         parser.add_argument('--encoder.c_in', type=int, help='encoder: number of input channels')
         parser.add_argument('--encoder.c_feat', type=int, help='encoder: number of feature channels')
         parser.add_argument('--encoder.c_out', type=int, help='encoder: number of output channels')

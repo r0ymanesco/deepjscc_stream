@@ -1,7 +1,8 @@
 loss: 'l2'
-train_epochs: 500
+train_epochs: 600
 save_dir: 'checkpoints/vct_bw_allocation'
-coding_stages: 200
+coding_stage: 200
+predictor_stage: 400
 
 dataset:
   dataset: 'ucf101'
@@ -13,15 +14,17 @@ dataset:
 optimizer:
   solver: 'adam'
   lr: 0.0001
+  fine_tune_loss_lmda: 0.1
 
 scheduler:
   scheduler: 'mult_lr'
   lr_schedule_factor: 0.8
 
 encoder:
+  target_quality: 25.0 # db psnr
   c_in: 3
   c_feat: 192
-  c_out: 128  #NOTE this can be any value
+  c_out: 128  # NOTE this can be any value
   tf_layers: [6, 4, 5]
   tf_heads: 16
   tf_ff: 2048

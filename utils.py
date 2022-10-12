@@ -1,3 +1,4 @@
+import ipdb
 import numpy as np
 
 import torch
@@ -102,6 +103,9 @@ def calc_msssim(predictions, targets):
 
 def calc_loss(prediction, target, loss, reduction='mean'):
     loss_aux = {}
+    shape = prediction.size()
+    n_dims = len(shape)
+    assert len(shape) <= 5
 
     match loss:
         case 'l2':
@@ -110,12 +114,10 @@ def calc_loss(prediction, target, loss, reduction='mean'):
                 case 'mean':
                     loss = loss.mean()
                 case 'batch':
-                    loss = torch.mean(loss, dim=(4, 3, 2))
+                    loss = torch.mean(loss, dim=[x for x in range(n_dims-1, n_dims-4, -1)])
                 case _:
                     raise NotImplementedError
         case 'msssim':
-            shape = prediction.size()
-            assert len(shape) <= 5
             if len(shape) == 5:
                 prediction = prediction.view(-1, shape[2], shape[3], shape[4])
                 target = target.view(-1, shape[2], shape[3], shape[4])
