@@ -77,9 +77,10 @@ class VCTBandwidthAllocation(BaseTrainer):
         if len(params.comments) != 0: self.job_name += f'_Ref({params.comments})'
 
         if self.resume: self.load_weights()
-        self.stage = 'fine_tune'
-        self.predictor_stage = self.epoch
-        self.coding_stage = 30
+        self.stage = 'prediction'
+        self.coding_stage = self.epoch
+        self.predictor_stage = self.coding_stage + 100
+        # self.coding_stage = 30
 
     def _get_data(self, params):
         (train_loader, val_loader, eval_loader), dataset_aux = get_dataloader(params.dataset, params)
@@ -386,13 +387,13 @@ class VCTBandwidthAllocation(BaseTrainer):
                 next_ref_frame = random_ref.detach()
 
                 q_pred, _ = self.predictor(encoder_aux['conditional_tokens'])
-                loss = F.mse_loss(q_pred, rate_dist_loss)
+                # loss = F.mse_loss(q_pred, rate_dist_loss)
+                loss = F.l1_loss(q_pred, rate_dist_loss)
                 batch_trackers['batch_loss'].append(loss.item())
             case 'fine_tune':
                 # FIXME channel codeword in this phase should include codewords from future frames,
                 # this ensures the power normalisation is fair
 
-                # FIXME the predictor does not necessarily preserve the ordering of rate-distortion
                 rate_dist_loss, _ = calc_loss(predictions, target, self.loss, 'batch')
                 q_pred, q_pred_scaled = self.predictor(encoder_aux['conditional_tokens'])
                 (rate_indices,
@@ -512,6 +513,7 @@ class VCTBandwidthAllocation(BaseTrainer):
             'stage': self.stage,
             'encoder': self.encoder.state_dict(),
             'decoder': self.decoder.state_dict(),
+            'predictor': self.predictor.state_dict(),
             'modem': self.modem.state_dict(),
             'channel': self.channel.state_dict(),
             'coding_optimizer': self.coding_optimizer.state_dict(),
@@ -527,6 +529,7 @@ class VCTBandwidthAllocation(BaseTrainer):
         self.stage = cp['stage']
         self.encoder.load_state_dict(cp['encoder'])
         self.decoder.load_state_dict(cp['decoder'])
+        # self.predictor.load_state_dict(cp['predictor'])
         self.modem.load_state_dict(cp['modem'])
         self.channel.load_state_dict(cp['channel'])
         self.coding_optimizer.load_state_dict(cp['coding_optimizer'])

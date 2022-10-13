@@ -324,7 +324,8 @@ class VCTPredictor(nn.Module):
             nn.LeakyReLU(),
             nn.Linear(n_patches_h*n_patches_w*c_out, n_patches_h*n_patches_w*c_out),
             nn.LeakyReLU(),
-            nn.Linear(n_patches_h*n_patches_w*c_out, 1)
+            nn.Linear(n_patches_h*n_patches_w*c_out, 1),
+            nn.ReLU(),
         )
 
     def _scale_for_metric(self, q_pred):
@@ -340,8 +341,10 @@ class VCTPredictor(nn.Module):
     def forward(self, conditional_tokens):
         B = conditional_tokens[0].size(0)
         batched_tokens = torch.cat(conditional_tokens, dim=0)
-        prediction = self.quality_predictor(
+        predictor_out = self.quality_predictor(
             batched_tokens.view(B*(self.c_win**2), -1)
         )
-        prediction = prediction.view(B, self.c_win**2)
+        predictor_out = predictor_out.view(B, self.c_win**2)
+        prediction = torch.cumsum(predictor_out, dim=1)
+        prediction = torch.fliplr(prediction)
         return self._scale_for_metric(prediction)
