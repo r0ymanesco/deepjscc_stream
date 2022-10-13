@@ -518,8 +518,10 @@ class VCTBandwidthAllocation(BaseTrainer):
             'channel': self.channel.state_dict(),
             'coding_optimizer': self.coding_optimizer.state_dict(),
             'predictor_optimizer': self.predictor_optimizer.state_dict(),
+            'fine_tune_optimizer': self.fine_tune_optimizer.state_dict(),
             'coding_scheduler': self.coding_scheduler.state_dict(),
             'predictor_scheduler': self.predictor_scheduler.state_dict(),
+            'fine_tune_scheduler': self.fine_tune_scheduler.state_dict(),
             'es': self.es.state_dict(),
             'epoch': self.epoch
         }, '{}/{}.pth'.format(self.save_dir, self.job_name))
@@ -529,13 +531,15 @@ class VCTBandwidthAllocation(BaseTrainer):
         self.stage = cp['stage']
         self.encoder.load_state_dict(cp['encoder'])
         self.decoder.load_state_dict(cp['decoder'])
-        # self.predictor.load_state_dict(cp['predictor'])
+        self.predictor.load_state_dict(cp['predictor'])
         self.modem.load_state_dict(cp['modem'])
         self.channel.load_state_dict(cp['channel'])
         self.coding_optimizer.load_state_dict(cp['coding_optimizer'])
         self.predictor_optimizer.load_state_dict(cp['predictor_optimizer'])
+        self.fine_tune_optimizer.load_state_dict(cp['fine_tune_optimizer'])
         self.coding_scheduler.load_state_dict(cp['coding_scheduler'])
         self.predictor_scheduler.load_state_dict(cp['predictor_scheduler'])
+        self.fine_tune_optimizer.load_state_dict(cp['fine_tune_scheduler'])
         self.es.load_state_dict(cp['es'])
         self.epoch = cp['epoch']
         print('Loaded weights from epoch {}'.format(self.epoch))
