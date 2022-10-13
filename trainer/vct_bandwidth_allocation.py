@@ -33,6 +33,7 @@ class VCTBandwidthAllocation(BaseTrainer):
         self.coding_stage = params.coding_stage
         self.predictor_stage = params.predictor_stage
         self.target_quality = params.encoder.target_quality
+        self.n_conditional_frames = params.encoder.n_conditional_frames
         self.fine_tune_loss_lmda = params.optimizer.fine_tune_loss_lmda
 
         self._get_config(params)
@@ -76,9 +77,9 @@ class VCTBandwidthAllocation(BaseTrainer):
         if len(params.comments) != 0: self.job_name += f'_Ref({params.comments})'
 
         if self.resume: self.load_weights()
-        self.stage = 'prediction'
-        self.predictor_stage = self.epoch + (self.predictor_stage - self.coding_stage)
-        self.coding_stage = self.epoch
+        self.stage = 'fine_tune'
+        self.predictor_stage = self.epoch
+        self.coding_stage = 30
 
     def _get_data(self, params):
         (train_loader, val_loader, eval_loader), dataset_aux = get_dataloader(params.dataset, params)
@@ -150,12 +151,7 @@ class VCTBandwidthAllocation(BaseTrainer):
         return channel
 
     def _get_gop_struct(self, n_frames):
-        if self._training:
-            gop_len = 3
-        else:
-            gop_len = 3
-        # FIXME consider more reference frames
-        return np.arange(0, n_frames+1, 1), gop_len
+        return np.arange(0, n_frames+1, 1), self.n_conditional_frames + 1
 
     def __call__(self, snr, *args, **kwargs):
         self.check_mode_set()
@@ -188,11 +184,11 @@ class VCTBandwidthAllocation(BaseTrainer):
 
                 n_frames = frames.size(1) // 3
                 frames = list(torch.chunk(frames.to(self.device), chunks=n_frames, dim=1))
-                frames = [torch.zeros_like(frames[0])] * 2 + frames
+                frames = [torch.zeros_like(frames[0])] * self.n_conditional_frames + frames
 
-                gop_struct, gop_len = self._get_gop_struct(n_frames+2)
+                gop_struct, gop_len = self._get_gop_struct(n_frames+self.n_conditional_frames)
 
-                decoder_ref = [torch.zeros_like(frames[0])] * 2
+                decoder_ref = [torch.zeros_like(frames[0])] * self.n_conditional_frames
                 for (f_start, f_end) in zip(gop_struct[:-gop_len], gop_struct[gop_len:]):
                     gop = frames[f_start:f_end]
                     target_frame = gop[-1]
@@ -328,7 +324,12 @@ class VCTBandwidthAllocation(BaseTrainer):
                 epoch_postfix[f'prediction loss'] = '{:.5f}'.format(epoch_trackers['loss_hist'][-1])
             case 'fine_tune':
                 epoch_trackers['loss_hist'].append(np.nanmean(batch_trackers['batch_loss']))
-                epoch_postfix[f'{self.loss} loss'] = '{:.5f}'.format(epoch_trackers['loss_hist'][-1])
+                epoch_postfix[f'comp loss'] = '{:.5f}'.format(epoch_trackers['loss_hist'][-1])
+
+                epoch_trackers['rate_hist'].extend(batch_trackers['batch_rate'])
+                batch_rate_mean = np.nanmean(batch_trackers['batch_rate'])
+                epoch_postfix['rate'] = '{:.5f}'.format(batch_rate_mean)
+
                 if not self._training:
                     epoch_trackers['psnr_hist'].extend(batch_trackers['batch_psnr'])
                     batch_psnr_mean = np.nanmean(batch_trackers['batch_psnr'])
@@ -337,10 +338,6 @@ class VCTBandwidthAllocation(BaseTrainer):
                     epoch_trackers['msssim_hist'].extend(batch_trackers['batch_msssim'])
                     batch_msssim_mean = np.nanmean(batch_trackers['batch_msssim'])
                     epoch_postfix['msssim'] = '{:.5f}'.format(batch_msssim_mean)
-
-                    epoch_trackers['rate_hist'].extend(batch_trackers['batch_rate'])
-                    batch_rate_mean = np.nanmean(batch_trackers['batch_rate'])
-                    epoch_postfix['rate'] = '{:.5f}'.format(batch_rate_mean)
             case _:
                 raise ValueError
         return epoch_trackers, epoch_postfix
@@ -395,6 +392,7 @@ class VCTBandwidthAllocation(BaseTrainer):
                 # FIXME channel codeword in this phase should include codewords from future frames,
                 # this ensures the power normalisation is fair
 
+                # FIXME the predictor does not necessarily preserve the ordering of rate-distortion
                 rate_dist_loss, _ = calc_loss(predictions, target, self.loss, 'batch')
                 q_pred, q_pred_scaled = self.predictor(encoder_aux['conditional_tokens'])
                 (rate_indices,
@@ -410,6 +408,9 @@ class VCTBandwidthAllocation(BaseTrainer):
                 loss = dist_loss_at_rate.mean() + self.fine_tune_loss_lmda * pred_loss
                 batch_trackers['batch_loss'].append(loss.item())
 
+                batch_avg_rate = (batch_rate_indices.to(torch.float).mean() * self.ch_uses_per_token) / self.frame_dim
+                batch_trackers['batch_rate'].append(batch_avg_rate.item())
+
                 if not self._training:
                     frame_psnr = calc_psnr(predicted_frames, target_frames)
                     batch_trackers['batch_psnr'].extend(frame_psnr)
@@ -417,8 +418,6 @@ class VCTBandwidthAllocation(BaseTrainer):
                     frame_msssim = calc_msssim(predicted_frames, target_frames)
                     batch_trackers['batch_msssim'].extend(frame_msssim)
 
-                    batch_avg_rate = (batch_rate_indices.mean() * self.ch_uses_per_token) / self.frame_dim
-                    batch_trackers['batch_rate'].append(batch_avg_rate.item())
             case _:
                 raise ValueError
 
@@ -562,6 +561,7 @@ class VCTBandwidthAllocation(BaseTrainer):
         parser.add_argument('--scheduler.lr_schedule_factor', type=float, help='scheduler: multi_lr: reduction factor')
 
         parser.add_argument('--encoder.target_quality', type=float, help='encoder: target frame quality (defined by train loss)')
+        parser.add_argument('--encoder.n_conditional_frames', type=int, help='encoder: number past conditional frames')
         parser.add_argument('--encoder.c_in', type=int, help='encoder: number of input channels')
         parser.add_argument('--encoder.c_feat', type=int, help='encoder: number of feature channels')
         parser.add_argument('--encoder.c_out', type=int, help='encoder: number of output channels')

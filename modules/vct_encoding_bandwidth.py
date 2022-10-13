@@ -69,6 +69,23 @@ def restore_shape(patches, output_shape, stride):
     return restored.contiguous()
 
 
+def get_rate_index(q_pred, target_q, frame_at_rate):
+    rate_indices = []
+    target_rate_frames = []
+    max_idx = torch.tensor([q_pred.size(1)-1]).to(q_pred.device)
+    for batch_idx, pred in enumerate(q_pred):
+        comp = torch.ge(pred, torch.ones_like(pred) * target_q)
+        if torch.any(comp):
+            _, idx = torch.max(comp.to(torch.float), dim=-1)
+            rate_indices.append(idx.unsqueeze(0))
+            target_rate_frames.append(frame_at_rate[idx][batch_idx])
+        else:
+            rate_indices.append(max_idx)
+            target_rate_frames.append(frame_at_rate[max_idx][batch_idx])
+    target_rate_frames = torch.stack(target_rate_frames, dim=0)
+    return rate_indices, target_rate_frames
+
+
 class VCTEncoderBandwidth(nn.Module):
     def __init__(self, c_in, c_feat, feat_dims, reduced, c_win, p_win,
                  tf_layers, tf_heads, tf_ff, tf_dropout=0.):
@@ -160,25 +177,26 @@ class VCTEncoderBandwidth(nn.Module):
 
         trg_mask = get_mask(self.c_win**2, self.c_win**2).to(int_tokens.device)
         tf_decoder_out = self.tf_decoder(int_tokens, tf_encoder_out, tgt_mask=trg_mask)
-        conditional_tokens = torch.chunk(tf_decoder_out, chunks=self.c_win**2, dim=1)
+        restored_decoder_out = tf_decoder_out.view(B, n_patches_h, n_patches_w, self.c_win*self.c_win, self.c_out)
+        restored_decoder_out = restored_decoder_out.permute(0, 3, 1, 2, 4)
+        conditional_tokens = torch.chunk(restored_decoder_out, chunks=self.c_win**2, dim=1)
 
-        codeword = tf_decoder_out.view(B, n_patches_h, n_patches_w, self.c_win, self.c_win, self.c_out)
-        # codeword = int_tokens.view(B, n_patches_h, n_patches_w, self.c_win, self.c_win, self.c_out)
+        # codeword = tf_decoder_out.view(B, n_patches_h, n_patches_w, self.c_win, self.c_win, self.c_out)
+        codeword = int_tokens.view(B, n_patches_h, n_patches_w, self.c_win, self.c_win, self.c_out)
         codeword = restore_shape(codeword, (H_out, W_out), self.c_win)
         codeword = torch.split(codeword, [self.feat_dims[1], H_out - self.feat_dims[1]], dim=2)[0]
         codeword = torch.split(codeword, [self.feat_dims[2], W_out - self.feat_dims[2]], dim=3)[0]
         return codeword.contiguous(), {'conditional_tokens': conditional_tokens}
 
     def forward(self, gop, stage):
-        match stage:
-            # case 'feature':
-            #     return self._feature_train(gop)
-            case 'coding':
-                return self._coding_train(gop)
-            case 'prediction':
-                return self._coding_train(gop)
-            case _:
-                raise ValueError
+        return self._coding_train(gop)
+        # match stage:
+        #     case 'coding':
+        #         return self._coding_train(gop)
+        #     case 'prediction':
+        #         return self._coding_train(gop)
+        #     case _:
+        #         raise ValueError
 
     def __str__(self):
         return f'VCTBWEncoder({self.c_in},{self.c_feat},{self.c_out},{self.tf_layers},{self.tf_heads},{self.tf_ff},{self.tf_dropout})'
@@ -269,33 +287,37 @@ class VCTDecoderBandwidth(nn.Module):
         frames = torch.sigmoid(self.feature_decoder(y_feat))
         frame_at_rate = torch.chunk(frames, chunks=self.c_win**2, dim=0)
         # NOTE this list contains a single frame decoded at different bw usages (n tokens)
-
         return frame_at_rate, {}
 
     def forward(self, codes, prev_frames, stage):
-        match stage:
-            # case 'feature':
-            #     return self._feature_train(codes, gop_len)
-            case 'coding':
-                return self._coding_train(codes, prev_frames)
-            case 'prediction':
-                return self._coding_train(codes, prev_frames)
-            case _:
-                raise ValueError
+        return self._coding_train(codes, prev_frames)
+        # match stage:
+        #     # case 'feature':
+        #     #     return self._feature_train(codes, gop_len)
+        #     case 'coding':
+        #         return self._coding_train(codes, prev_frames)
+        #     case 'prediction':
+        #         return self._coding_train(codes, prev_frames)
+        #     case _:
+        #         raise ValueError
 
     def __str__(self):
         return f'VCTBWDecoder({self.c_in},{self.c_feat},{self.c_out},{self.tf_layers},{self.tf_heads},{self.tf_ff},{self.tf_dropout})'
 
 
 class VCTPredictor(nn.Module):
-    def __init__(self, feat_dims, c_win, p_win):
+    def __init__(self, loss, feat_dims, c_win, p_win):
         super().__init__()
+        self.loss = loss
+        self.c_win = c_win
+
         c_out = feat_dims[0]
         self.trg_h_pad, self.trg_w_pad = get_pad(feat_dims[1], feat_dims[2], c_win)
         self.src_h_pad = [pad + ((p_win - c_win) // 2) for pad in self.trg_h_pad]
         self.src_w_pad = [pad + ((p_win - c_win) // 2) for pad in self.trg_w_pad]
         n_patches_h = (feat_dims[1] + sum(self.trg_h_pad)) // c_win
         n_patches_w = (feat_dims[2] + sum(self.trg_w_pad)) // c_win
+        self.ch_uses_per_token = n_patches_h*n_patches_w*c_out
 
         self.quality_predictor = nn.Sequential(
             nn.Linear(n_patches_h*n_patches_w*c_out, n_patches_h*n_patches_w*c_out),
@@ -305,11 +327,21 @@ class VCTPredictor(nn.Module):
             nn.Linear(n_patches_h*n_patches_w*c_out, 1)
         )
 
+    def _scale_for_metric(self, q_pred):
+        match self.loss:
+            case 'l2':
+                q_pred = q_pred.pow(2)
+                return q_pred, 10 * torch.log10(1. / q_pred)
+            case 'msssim':
+                return q_pred.clamp(0, 1), q_pred.clamp(0, 1)
+            case _:
+                raise ValueError
+
     def forward(self, conditional_tokens):
-        ipdb.set_trace()
         B = conditional_tokens[0].size(0)
         batched_tokens = torch.cat(conditional_tokens, dim=0)
         prediction = self.quality_predictor(
-            batched_tokens.view(B*len(conditional_tokens), -1)
+            batched_tokens.view(B*(self.c_win**2), -1)
         )
-        return prediction
+        prediction = prediction.view(B, self.c_win**2)
+        return self._scale_for_metric(prediction)
