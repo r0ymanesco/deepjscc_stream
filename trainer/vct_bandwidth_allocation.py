@@ -136,7 +136,11 @@ class VCTBandwidthAllocation(BaseTrainer):
             loss=self.loss,
             feat_dims=feat_dims,
             c_win=params.c_win,
-            p_win=params.p_win
+            p_win=params.p_win,
+            tf_layers=params.tf_layers,
+            tf_heads=params.tf_heads,
+            tf_ff=params.tf_ff,
+            tf_dropout=params.tf_dropout
         ).to(self.device)
         self.job_name += '_' + str(encoder) + '_' + str(decoder)
         return encoder, decoder, predictor
@@ -380,14 +384,15 @@ class VCTBandwidthAllocation(BaseTrainer):
                     batch_trackers['top_rate_msssim'].extend(calc_msssim([frame_at_rate[-1]], [target_frame]))
             case 'prediction':
                 rate_dist_loss, _ = calc_loss(predictions, target, self.loss, 'batch')
-                dist_loss_mean = torch.mean(rate_dist_loss)
 
                 rand_i = np.random.randint(len(frame_at_rate))
                 random_ref = frame_at_rate[rand_i]
                 next_ref_frame = random_ref.detach()
 
-                q_pred, _ = self.predictor(encoder_aux['conditional_tokens'])
+                q_pred, _ = self.predictor(encoder_aux['int_tokens'], encoder_aux['prev_tokens'])
+                # q_pred, _ = self.predictor(encoder_aux['conditional_tokens'])
                 # loss = F.mse_loss(q_pred, rate_dist_loss)
+
                 loss = F.l1_loss(q_pred, rate_dist_loss)
                 batch_trackers['batch_loss'].append(loss.item())
             case 'fine_tune':
@@ -395,7 +400,10 @@ class VCTBandwidthAllocation(BaseTrainer):
                 # this ensures the power normalisation is fair
 
                 rate_dist_loss, _ = calc_loss(predictions, target, self.loss, 'batch')
-                q_pred, q_pred_scaled = self.predictor(encoder_aux['conditional_tokens'])
+
+                q_pred, q_pred_scaled = self.predictor(encoder_aux['int_tokens'], encoder_aux['prev_tokens'])
+                # q_pred, q_pred_scaled = self.predictor(encoder_aux['conditional_tokens'])
+
                 (rate_indices,
                 target_rate_frames) = get_rate_index(q_pred_scaled, self.target_quality, frame_at_rate)
                 next_ref_frame = target_rate_frames.detach()
@@ -405,7 +413,8 @@ class VCTBandwidthAllocation(BaseTrainer):
 
                 batch_rate_indices = torch.stack(rate_indices, dim=0)
                 dist_loss_at_rate = torch.gather(rate_dist_loss, 1, batch_rate_indices)
-                pred_loss = F.mse_loss(q_pred, rate_dist_loss)
+                # loss = F.mse_loss(q_pred, rate_dist_loss)
+                pred_loss = F.l1_loss(q_pred, rate_dist_loss)
                 loss = dist_loss_at_rate.mean() + self.fine_tune_loss_lmda * pred_loss
                 batch_trackers['batch_loss'].append(loss.item())
 
@@ -458,25 +467,25 @@ class VCTBandwidthAllocation(BaseTrainer):
                 torch.set_grad_enabled(True)
                 self.encoder.train()
                 self.decoder.train()
+                self.predictor.train()
                 self.modem.train()
                 self.channel.train()
-                self.predictor.train()
                 self.loader = self.train_loader
             case 'val':
                 torch.set_grad_enabled(False)
                 self.encoder.eval()
                 self.decoder.eval()
+                self.predictor.eval()
                 self.modem.eval()
                 self.channel.eval()
-                self.predictor.eval()
                 self.loader = self.val_loader
             case 'eval':
                 torch.set_grad_enabled(False)
                 self.encoder.eval()
                 self.decoder.eval()
+                self.predictor.eval()
                 self.modem.eval()
                 self.channel.eval()
-                self.predictor.eval()
                 self.loader = self.eval_loader
 
         self._set_stage()
@@ -488,6 +497,7 @@ class VCTBandwidthAllocation(BaseTrainer):
             self.lr_scheduler = self.coding_scheduler
 
             self.predictor.eval()
+            self.predictor.requires_grad_(False)
         elif self.epoch <= self.predictor_stage:
             self.stage = 'prediction'
             self.optimizer = self.predictor_optimizer
@@ -495,9 +505,16 @@ class VCTBandwidthAllocation(BaseTrainer):
             if self.epoch == self.coding_stage+1: self.es.reset()
 
             self.encoder.eval()
+            self.encoder.requires_grad_(False)
+
             self.decoder.eval()
+            self.decoder.requires_grad_(False)
+
             self.modem.eval()
+            self.modem.requires_grad_(False)
+
             self.channel.eval()
+            self.channel.requires_grad_(False)
         else:
             self.stage = 'fine_tune'
             self.optimizer = self.fine_tune_optimizer
@@ -531,15 +548,15 @@ class VCTBandwidthAllocation(BaseTrainer):
         self.stage = cp['stage']
         self.encoder.load_state_dict(cp['encoder'])
         self.decoder.load_state_dict(cp['decoder'])
-        self.predictor.load_state_dict(cp['predictor'])
+        # self.predictor.load_state_dict(cp['predictor'])
         self.modem.load_state_dict(cp['modem'])
         self.channel.load_state_dict(cp['channel'])
         self.coding_optimizer.load_state_dict(cp['coding_optimizer'])
-        self.predictor_optimizer.load_state_dict(cp['predictor_optimizer'])
-        self.fine_tune_optimizer.load_state_dict(cp['fine_tune_optimizer'])
+        # self.predictor_optimizer.load_state_dict(cp['predictor_optimizer'])
+        # self.fine_tune_optimizer.load_state_dict(cp['fine_tune_optimizer'])
         self.coding_scheduler.load_state_dict(cp['coding_scheduler'])
-        self.predictor_scheduler.load_state_dict(cp['predictor_scheduler'])
-        self.fine_tune_optimizer.load_state_dict(cp['fine_tune_scheduler'])
+        # self.predictor_scheduler.load_state_dict(cp['predictor_scheduler'])
+        # self.fine_tune_optimizer.load_state_dict(cp['fine_tune_scheduler'])
         self.es.load_state_dict(cp['es'])
         self.epoch = cp['epoch']
         print('Loaded weights from epoch {}'.format(self.epoch))
