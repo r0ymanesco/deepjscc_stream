@@ -8,6 +8,8 @@ from torch.distributions.normal import Normal
 
 from modules.feature_encoder_simple import FeatureEncoderSimple, FeatureDecoderSimple
 from modules.feature_encoder import FeatureEncoder, FeatureDecoder
+from modules.feature_encoder_elic import FeatureEncoderELIC, FeatureDecoderELIC
+from modules.feature_encoder_elicSM import FeatureEncoderELICSM, FeatureDecoderELICSM
 
 
 def get_block_mask(q_len, k_len, dims):
@@ -112,8 +114,9 @@ class VCTEncoderBandwidth(nn.Module):
 
         c_out = feat_dims[0]
         self.c_out = c_out
-        self.feature_encoder = FeatureEncoderSimple(c_in, c_feat, c_out, reduced)
+        # self.feature_encoder = FeatureEncoderSimple(c_in, c_feat, c_out, reduced)
         # self.feature_encoder = FeatureEncoder(c_in, c_feat, c_out, reduced)
+        self.feature_encoder = FeatureEncoderELIC(c_in, c_feat, c_out, reduced)
 
         tf_encoder_layer = nn.TransformerEncoderLayer(c_out, tf_heads, tf_ff, tf_dropout, batch_first=True)
         self.tf_encoder_sep = nn.TransformerEncoder(tf_encoder_layer, num_layers=tf_layers[0])
@@ -183,31 +186,30 @@ class VCTEncoderBandwidth(nn.Module):
         int_tokens = int_tokens.view(B*n_patches_h*n_patches_w, -1, self.c_out)
         # (B*n_patches_h*n_patches_w, c_win*c_win, C)
 
-        # sep_input = prev_tokens.view(B*n_prev_tokens*n_patches_h*n_patches_w, -1, self.c_out)
-        # sep_output = self.tf_encoder_sep(sep_input)
+        sep_input = prev_tokens.view(B*n_prev_tokens*n_patches_h*n_patches_w, -1, self.c_out)
+        sep_output = self.tf_encoder_sep(sep_input)
 
-        # joint_input = sep_output.view(B, n_prev_tokens, n_patches_h, n_patches_w, -1, self.c_out)
-        # joint_input = joint_input.permute(0, 2, 3, 1, 4, 5).contiguous()
-        # # (B, n_patches_h, n_patches_w, n_prev_tokens, p_win*p_win, c_out)
-        # joint_input = joint_input.view(B*n_patches_h*n_patches_w, -1, self.c_out)
-        # # (B*n_patches_h*n_patches_w, n_prev_tokens*p_win*p_win, c_out)
-        # tf_encoder_out = self.tf_encoder_joint(joint_input)
+        joint_input = sep_output.view(B, n_prev_tokens, n_patches_h, n_patches_w, -1, self.c_out)
+        joint_input = joint_input.permute(0, 2, 3, 1, 4, 5).contiguous()
+        # (B, n_patches_h, n_patches_w, n_prev_tokens, p_win*p_win, c_out)
+        joint_input = joint_input.view(B*n_patches_h*n_patches_w, -1, self.c_out)
+        # (B*n_patches_h*n_patches_w, n_prev_tokens*p_win*p_win, c_out)
+        tf_encoder_out = self.tf_encoder_joint(joint_input)
 
-        # trg_mask = get_mask(self.c_win**2, self.c_win**2).to(int_tokens.device)
-        # tf_decoder_out = self.tf_decoder(int_tokens, tf_encoder_out, tgt_mask=trg_mask)
-        # restored_decoder_out = tf_decoder_out.view(B, n_patches_h, n_patches_w, self.c_win*self.c_win, self.c_out)
-        # restored_decoder_out = restored_decoder_out.permute(0, 3, 1, 2, 4)
-        # # (B, c_win*c_win, n_patches_h, n_patches_w, C)
-        # conditional_tokens = torch.chunk(restored_decoder_out, chunks=self.c_win**2, dim=1)
+        trg_mask = get_mask(self.c_win**2, self.c_win**2).to(int_tokens.device)
+        tf_decoder_out = self.tf_decoder(int_tokens, tf_encoder_out, tgt_mask=trg_mask)
+        restored_decoder_out = tf_decoder_out.view(B, n_patches_h, n_patches_w, self.c_win*self.c_win, self.c_out)
+        conditional_tokens = restored_decoder_out.permute(0, 3, 1, 2, 4)
+        # (B, c_win*c_win, n_patches_h, n_patches_w, C)
 
-        # codeword = tf_decoder_out.view(B, n_patches_h, n_patches_w, self.c_win, self.c_win, self.c_out)
-        codeword = int_tokens.view(B, n_patches_h, n_patches_w, self.c_win, self.c_win, self.c_out)
+        codeword = tf_decoder_out.view(B, n_patches_h, n_patches_w, self.c_win, self.c_win, self.c_out)
+        # codeword = int_tokens.view(B, n_patches_h, n_patches_w, self.c_win, self.c_win, self.c_out)
         codeword = restore_shape(codeword, (H_out, W_out), self.c_win)
         codeword = torch.split(codeword, [self.feat_dims[1], H_out - self.feat_dims[1]], dim=2)[0]
         codeword = torch.split(codeword, [self.feat_dims[2], W_out - self.feat_dims[2]], dim=3)[0]
-        return codeword.contiguous(), {'prev_tokens': prev_tokens,
-                                       'int_tokens': int_tokens}
-        # return codeword.contiguous(), {'conditional_tokens': conditional_tokens}
+        # return codeword.contiguous(), {'prev_tokens': prev_tokens,
+        #                                'int_tokens': int_tokens}
+        return codeword.contiguous(), {'conditional_tokens': conditional_tokens}
 
     def forward(self, gop, stage):
         return self._coding_train(gop)
@@ -247,10 +249,12 @@ class VCTDecoderBandwidth(nn.Module):
 
         c_out = feat_dims[0]
         self.c_out = c_out
-        self.feature_decoder = FeatureDecoderSimple(c_out, c_feat, c_in, reduced)
-        self.auto_feature_encoder = FeatureEncoderSimple(c_in, c_feat, c_out, reduced)
+        # self.feature_decoder = FeatureDecoderSimple(c_out, c_feat, c_in, reduced)
+        # self.auto_feature_encoder = FeatureEncoderSimple(c_in, c_feat, c_out, reduced)
         # self.feature_decoder = FeatureDecoder(c_out, c_feat, c_in, reduced)
         # self.auto_feature_encoder = FeatureEncoder(c_in, c_feat, c_out, reduced)
+        self.feature_decoder = FeatureDecoderELIC(c_out, c_feat, c_in, reduced)
+        self.auto_feature_encoder = FeatureEncoderELIC(c_in, c_feat, c_out, reduced)
 
         tf_encoder_layer = nn.TransformerEncoderLayer(c_out, tf_heads, tf_ff, tf_dropout, batch_first=True)
         self.tf_encoder_sep = nn.TransformerEncoder(tf_encoder_layer, num_layers=tf_layers[0])
@@ -340,7 +344,8 @@ class VCTPredictor(nn.Module):
         self.src_w_pad = [pad + ((p_win - c_win) // 2) for pad in self.trg_w_pad]
         self.n_patches_h = (feat_dims[1] + sum(self.trg_h_pad)) // c_win
         self.n_patches_w = (feat_dims[2] + sum(self.trg_w_pad)) // c_win
-        self.ch_uses_per_token = self.n_patches_h*self.n_patches_w*c_out
+        self.ch_uses_per_token = self.n_patches_h * self.n_patches_w * c_out
+        self.n_rates = self.c_win ** 2
 
         tf_encoder_layer = nn.TransformerEncoderLayer(c_out, tf_heads, tf_ff, tf_dropout, batch_first=True)
         self.tf_encoder_sep = nn.TransformerEncoder(tf_encoder_layer, num_layers=tf_layers[0])
@@ -371,37 +376,37 @@ class VCTPredictor(nn.Module):
             case _:
                 raise ValueError
 
-    def forward(self, int_tokens, prev_tokens):
-        B = int_tokens.size(0) // (self.n_patches_h * self.n_patches_w)
-        n_prev_tokens = prev_tokens.size(0) // B
+    # def forward(self, int_tokens, prev_tokens):
+    def forward(self, conditional_tokens):
+        # B = int_tokens.size(0) // (self.n_patches_h * self.n_patches_w)
+        # n_prev_tokens = prev_tokens.size(0) // B
 
-        sep_input = prev_tokens.view(B*n_prev_tokens*self.n_patches_h*self.n_patches_w, -1, self.c_out)
-        sep_output = self.tf_encoder_sep(sep_input)
+        # sep_input = prev_tokens.view(B*n_prev_tokens*self.n_patches_h*self.n_patches_w, -1, self.c_out)
+        # sep_output = self.tf_encoder_sep(sep_input)
 
-        joint_input = sep_output.view(B, n_prev_tokens, self.n_patches_h, self.n_patches_w, -1, self.c_out)
-        joint_input = joint_input.permute(0, 2, 3, 1, 4, 5).contiguous()
-        # (B, n_patches_h, n_patches_w, n_prev_tokens, p_win*p_win, c_out)
-        joint_input = joint_input.view(B*self.n_patches_h*self.n_patches_w, -1, self.c_out)
-        # (B*n_patches_h*n_patches_w, n_prev_tokens*p_win*p_win, c_out)
-        tf_encoder_out = self.tf_encoder_joint(joint_input)
+        # joint_input = sep_output.view(B, n_prev_tokens, self.n_patches_h, self.n_patches_w, -1, self.c_out)
+        # joint_input = joint_input.permute(0, 2, 3, 1, 4, 5).contiguous()
+        # # (B, n_patches_h, n_patches_w, n_prev_tokens, p_win*p_win, c_out)
+        # joint_input = joint_input.view(B*self.n_patches_h*self.n_patches_w, -1, self.c_out)
+        # # (B*n_patches_h*n_patches_w, n_prev_tokens*p_win*p_win, c_out)
+        # tf_encoder_out = self.tf_encoder_joint(joint_input)
 
-        trg_mask = get_mask(self.c_win**2, self.c_win**2).to(int_tokens.device)
-        tf_decoder_out = self.tf_decoder(int_tokens, tf_encoder_out, tgt_mask=trg_mask)
-        restored_decoder_out = tf_decoder_out.view(B, self.n_patches_h, self.n_patches_w, self.c_win*self.c_win, self.c_out)
-        batched_tokens = restored_decoder_out.permute(0, 3, 1, 2, 4).contiguous()
-        # (B, c_win*c_win, n_patches_h, n_patches_w, C)
+        # trg_mask = get_mask(self.c_win**2, self.c_win**2).to(int_tokens.device)
+        # tf_decoder_out = self.tf_decoder(int_tokens, tf_encoder_out, tgt_mask=trg_mask)
+        # restored_decoder_out = tf_decoder_out.view(B, self.n_patches_h, self.n_patches_w, self.c_win*self.c_win, self.c_out)
+        # batched_tokens = restored_decoder_out.permute(0, 3, 1, 2, 4).contiguous()
+        # # (B, c_win*c_win, n_patches_h, n_patches_w, C)
 
-        predictor_out = self.quality_predictor(
-            batched_tokens.view(B, (self.c_win**2), -1)
-        ).view(B, self.c_win**2)
-        prediction = torch.cumsum(predictor_out.pow(2), dim=1)
-        prediction = torch.fliplr(prediction)
-
-        # B = conditional_tokens[0].size(0)
-        # batched_tokens = torch.cat(conditional_tokens, dim=1)
         # predictor_out = self.quality_predictor(
         #     batched_tokens.view(B, (self.c_win**2), -1)
         # ).view(B, self.c_win**2)
-        # prediction = torch.cumsum(predictor_out, dim=1)
+        # prediction = torch.cumsum(predictor_out.pow(2), dim=1)
         # prediction = torch.fliplr(prediction)
+
+        B = conditional_tokens.size(0)
+        predictor_out = self.quality_predictor(
+            conditional_tokens.view(B, (self.c_win**2), -1)
+        ).view(B, self.c_win**2)
+        prediction = torch.cumsum(predictor_out, dim=1)
+        prediction = torch.fliplr(prediction)
         return self._scale_for_metric(prediction)

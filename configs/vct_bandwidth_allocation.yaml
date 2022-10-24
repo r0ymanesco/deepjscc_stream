@@ -8,13 +8,14 @@ dataset:
   dataset: 'ucf101'
   path: '/home/tt2114/datasets/UCF101'
   frames_per_clip: 25
-  train_batch_size: 5
-  eval_batch_size: 5
+  train_batch_size: 4
+  eval_batch_size: 4
 
 optimizer:
   solver: 'adam'
   lr: 0.0001
   fine_tune_loss_lmda: 1.0
+  loss_modulator_lmda: 0.5
 
 scheduler:
   scheduler: 'mult_lr'
@@ -25,7 +26,7 @@ encoder:
   n_conditional_frames: 2
   c_in: 3
   c_feat: 192
-  c_out: 128  # NOTE this can be any value
+  c_out: 128  # NOTE this can be any value (not bound to bw ratio)
   tf_layers: [6, 4, 5]
   tf_heads: 16
   tf_ff: 2048
