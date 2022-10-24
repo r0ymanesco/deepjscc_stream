@@ -1,4 +1,5 @@
 import ipdb
+import numpy as np
 
 import torch
 import torch.nn as nn
@@ -121,6 +122,8 @@ class VCTEncoderBandwidth(nn.Module):
         tf_decoder_layer = nn.TransformerDecoderLayer(c_out, tf_heads, tf_ff, tf_dropout, batch_first=True)
         self.tf_decoder = nn.TransformerDecoder(tf_decoder_layer, num_layers=tf_layers[2])
 
+        # self.rate_tokens = self._get_rate_tokens(c_win**2, c_out)
+
         # self.distribution_mapper = nn.Linear(c_out, 2*c_out)
 
     # def _compute_likelihood(self, decoder_in, decoder_out):
@@ -140,6 +143,21 @@ class VCTEncoderBandwidth(nn.Module):
     #     likelihood = distribution.cdf(decoder_in + 0.5) - distribution.cdf(decoder_in - 0.5)
     #     likelihood = likelihood.view(B, seq_len, -1)
     #     return likelihood
+
+    def _get_rate_tokens(self, L, L_e):
+        rate_tokens = []
+        for level in range(L):
+            s = torch.tensor([level * (L_e - 1) / (L - 1)])
+            u = torch.floor(s).to(torch.int64)
+            v = ((u + 1) % L_e).to(torch.int64)
+            d_u = s - u
+            d_v = v - s
+            alpha = d_v / (d_u + d_v)
+            beta = 1 - alpha
+            v_l = alpha * F.one_hot(u, num_classes=L_e) + beta * F.one_hot(v, num_classes=L_e)
+            rate_tokens.append(v_l)
+        rate_tokens = torch.cat(rate_tokens, dim=0)
+        return rate_tokens
 
     def _feature_train(self, gop):
         frames = torch.cat(gop, dim=0)
@@ -165,28 +183,31 @@ class VCTEncoderBandwidth(nn.Module):
         int_tokens = int_tokens.view(B*n_patches_h*n_patches_w, -1, self.c_out)
         # (B*n_patches_h*n_patches_w, c_win*c_win, C)
 
-        sep_input = prev_tokens.view(B*n_prev_tokens*n_patches_h*n_patches_w, -1, self.c_out)
-        sep_output = self.tf_encoder_sep(sep_input)
+        # sep_input = prev_tokens.view(B*n_prev_tokens*n_patches_h*n_patches_w, -1, self.c_out)
+        # sep_output = self.tf_encoder_sep(sep_input)
 
-        joint_input = sep_output.view(B, n_prev_tokens, n_patches_h, n_patches_w, -1, self.c_out)
-        joint_input = joint_input.permute(0, 2, 3, 1, 4, 5).contiguous()
-        # (B, n_patches_h, n_patches_w, n_prev_tokens, p_win*p_win, c_out)
-        joint_input = joint_input.view(B*n_patches_h*n_patches_w, -1, self.c_out)
-        # (B*n_patches_h*n_patches_w, n_prev_tokens*p_win*p_win, c_out)
-        tf_encoder_out = self.tf_encoder_joint(joint_input)
+        # joint_input = sep_output.view(B, n_prev_tokens, n_patches_h, n_patches_w, -1, self.c_out)
+        # joint_input = joint_input.permute(0, 2, 3, 1, 4, 5).contiguous()
+        # # (B, n_patches_h, n_patches_w, n_prev_tokens, p_win*p_win, c_out)
+        # joint_input = joint_input.view(B*n_patches_h*n_patches_w, -1, self.c_out)
+        # # (B*n_patches_h*n_patches_w, n_prev_tokens*p_win*p_win, c_out)
+        # tf_encoder_out = self.tf_encoder_joint(joint_input)
 
-        trg_mask = get_mask(self.c_win**2, self.c_win**2).to(int_tokens.device)
-        tf_decoder_out = self.tf_decoder(int_tokens, tf_encoder_out, tgt_mask=trg_mask)
-        restored_decoder_out = tf_decoder_out.view(B, n_patches_h, n_patches_w, self.c_win*self.c_win, self.c_out)
-        restored_decoder_out = restored_decoder_out.permute(0, 3, 1, 2, 4)
-        conditional_tokens = torch.chunk(restored_decoder_out, chunks=self.c_win**2, dim=1)
+        # trg_mask = get_mask(self.c_win**2, self.c_win**2).to(int_tokens.device)
+        # tf_decoder_out = self.tf_decoder(int_tokens, tf_encoder_out, tgt_mask=trg_mask)
+        # restored_decoder_out = tf_decoder_out.view(B, n_patches_h, n_patches_w, self.c_win*self.c_win, self.c_out)
+        # restored_decoder_out = restored_decoder_out.permute(0, 3, 1, 2, 4)
+        # # (B, c_win*c_win, n_patches_h, n_patches_w, C)
+        # conditional_tokens = torch.chunk(restored_decoder_out, chunks=self.c_win**2, dim=1)
 
         # codeword = tf_decoder_out.view(B, n_patches_h, n_patches_w, self.c_win, self.c_win, self.c_out)
         codeword = int_tokens.view(B, n_patches_h, n_patches_w, self.c_win, self.c_win, self.c_out)
         codeword = restore_shape(codeword, (H_out, W_out), self.c_win)
         codeword = torch.split(codeword, [self.feat_dims[1], H_out - self.feat_dims[1]], dim=2)[0]
         codeword = torch.split(codeword, [self.feat_dims[2], W_out - self.feat_dims[2]], dim=3)[0]
-        return codeword.contiguous(), {'conditional_tokens': conditional_tokens}
+        return codeword.contiguous(), {'prev_tokens': prev_tokens,
+                                       'int_tokens': int_tokens}
+        # return codeword.contiguous(), {'conditional_tokens': conditional_tokens}
 
     def forward(self, gop, stage):
         return self._coding_train(gop)
@@ -306,45 +327,81 @@ class VCTDecoderBandwidth(nn.Module):
 
 
 class VCTPredictor(nn.Module):
-    def __init__(self, loss, feat_dims, c_win, p_win):
+    def __init__(self, loss, feat_dims, c_win, p_win,
+                 tf_layers, tf_heads, tf_ff, tf_dropout=0.):
         super().__init__()
         self.loss = loss
         self.c_win = c_win
 
         c_out = feat_dims[0]
+        self.c_out = c_out
         self.trg_h_pad, self.trg_w_pad = get_pad(feat_dims[1], feat_dims[2], c_win)
         self.src_h_pad = [pad + ((p_win - c_win) // 2) for pad in self.trg_h_pad]
         self.src_w_pad = [pad + ((p_win - c_win) // 2) for pad in self.trg_w_pad]
-        n_patches_h = (feat_dims[1] + sum(self.trg_h_pad)) // c_win
-        n_patches_w = (feat_dims[2] + sum(self.trg_w_pad)) // c_win
-        self.ch_uses_per_token = n_patches_h*n_patches_w*c_out
+        self.n_patches_h = (feat_dims[1] + sum(self.trg_h_pad)) // c_win
+        self.n_patches_w = (feat_dims[2] + sum(self.trg_w_pad)) // c_win
+        self.ch_uses_per_token = self.n_patches_h*self.n_patches_w*c_out
+
+        tf_encoder_layer = nn.TransformerEncoderLayer(c_out, tf_heads, tf_ff, tf_dropout, batch_first=True)
+        self.tf_encoder_sep = nn.TransformerEncoder(tf_encoder_layer, num_layers=tf_layers[0])
+        self.tf_encoder_joint = nn.TransformerEncoder(tf_encoder_layer, num_layers=tf_layers[1])
+
+        tf_decoder_layer = nn.TransformerDecoderLayer(c_out, tf_heads, tf_ff, tf_dropout, batch_first=True)
+        self.tf_decoder = nn.TransformerDecoder(tf_decoder_layer, num_layers=tf_layers[2])
 
         self.quality_predictor = nn.Sequential(
-            nn.Linear(n_patches_h*n_patches_w*c_out, n_patches_h*n_patches_w*c_out),
+            nn.Linear(self.ch_uses_per_token, self.ch_uses_per_token),
             nn.LeakyReLU(),
-            nn.Linear(n_patches_h*n_patches_w*c_out, n_patches_h*n_patches_w*c_out),
+            nn.Linear(self.ch_uses_per_token, self.ch_uses_per_token),
             nn.LeakyReLU(),
-            nn.Linear(n_patches_h*n_patches_w*c_out, 1),
-            nn.ReLU(),
+            nn.Linear(self.ch_uses_per_token, self.ch_uses_per_token),
+            nn.LeakyReLU(),
+            nn.Linear(self.ch_uses_per_token, self.ch_uses_per_token),
+            nn.LeakyReLU(),
+            nn.Linear(self.ch_uses_per_token, 1),
         )
 
     def _scale_for_metric(self, q_pred):
         match self.loss:
             case 'l2':
-                q_pred = q_pred.pow(2)
+                # q_pred = q_pred.pow(2)
                 return q_pred, 10 * torch.log10(1. / q_pred)
             case 'msssim':
                 return q_pred.clamp(0, 1), q_pred.clamp(0, 1)
             case _:
                 raise ValueError
 
-    def forward(self, conditional_tokens):
-        B = conditional_tokens[0].size(0)
-        batched_tokens = torch.cat(conditional_tokens, dim=0)
+    def forward(self, int_tokens, prev_tokens):
+        B = int_tokens.size(0) // (self.n_patches_h * self.n_patches_w)
+        n_prev_tokens = prev_tokens.size(0) // B
+
+        sep_input = prev_tokens.view(B*n_prev_tokens*self.n_patches_h*self.n_patches_w, -1, self.c_out)
+        sep_output = self.tf_encoder_sep(sep_input)
+
+        joint_input = sep_output.view(B, n_prev_tokens, self.n_patches_h, self.n_patches_w, -1, self.c_out)
+        joint_input = joint_input.permute(0, 2, 3, 1, 4, 5).contiguous()
+        # (B, n_patches_h, n_patches_w, n_prev_tokens, p_win*p_win, c_out)
+        joint_input = joint_input.view(B*self.n_patches_h*self.n_patches_w, -1, self.c_out)
+        # (B*n_patches_h*n_patches_w, n_prev_tokens*p_win*p_win, c_out)
+        tf_encoder_out = self.tf_encoder_joint(joint_input)
+
+        trg_mask = get_mask(self.c_win**2, self.c_win**2).to(int_tokens.device)
+        tf_decoder_out = self.tf_decoder(int_tokens, tf_encoder_out, tgt_mask=trg_mask)
+        restored_decoder_out = tf_decoder_out.view(B, self.n_patches_h, self.n_patches_w, self.c_win*self.c_win, self.c_out)
+        batched_tokens = restored_decoder_out.permute(0, 3, 1, 2, 4).contiguous()
+        # (B, c_win*c_win, n_patches_h, n_patches_w, C)
+
         predictor_out = self.quality_predictor(
-            batched_tokens.view(B*(self.c_win**2), -1)
-        )
-        predictor_out = predictor_out.view(B, self.c_win**2)
-        prediction = torch.cumsum(predictor_out, dim=1)
+            batched_tokens.view(B, (self.c_win**2), -1)
+        ).view(B, self.c_win**2)
+        prediction = torch.cumsum(predictor_out.pow(2), dim=1)
         prediction = torch.fliplr(prediction)
+
+        # B = conditional_tokens[0].size(0)
+        # batched_tokens = torch.cat(conditional_tokens, dim=1)
+        # predictor_out = self.quality_predictor(
+        #     batched_tokens.view(B, (self.c_win**2), -1)
+        # ).view(B, self.c_win**2)
+        # prediction = torch.cumsum(predictor_out, dim=1)
+        # prediction = torch.fliplr(prediction)
         return self._scale_for_metric(prediction)
