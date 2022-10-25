@@ -6,7 +6,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions.normal import Normal
 
-from modules.feature_encoder_simple import FeatureEncoderSimple, FeatureDecoderSimple
 from modules.feature_encoder import FeatureEncoder, FeatureDecoder
 from modules.feature_encoder_elic import FeatureEncoderELIC, FeatureDecoderELIC
 from modules.feature_encoder_elicSM import FeatureEncoderELICSM, FeatureDecoderELICSM
@@ -91,12 +90,14 @@ def get_rate_index(q_pred, target_q, frame_at_rate):
 
 class VCTEncoderBandwidth(nn.Module):
     def __init__(self, c_in, c_feat, feat_dims, reduced, c_win, p_win,
-                 tf_layers, tf_heads, tf_ff, tf_dropout=0.):
+                 tf_layers, tf_heads, tf_ff, tf_dropout=0.,
+                 target_quality=np.inf):
         super().__init__()
         self.c_in = c_in
         self.c_feat = c_feat
         self.feat_dims = feat_dims
         self.reduced = reduced
+        self.target_quality = target_quality
 
         self.c_win = c_win
         self.p_win = p_win
@@ -114,7 +115,6 @@ class VCTEncoderBandwidth(nn.Module):
 
         c_out = feat_dims[0]
         self.c_out = c_out
-        # self.feature_encoder = FeatureEncoderSimple(c_in, c_feat, c_out, reduced)
         # self.feature_encoder = FeatureEncoder(c_in, c_feat, c_out, reduced)
         self.feature_encoder = FeatureEncoderELIC(c_in, c_feat, c_out, reduced)
 
@@ -211,15 +211,26 @@ class VCTEncoderBandwidth(nn.Module):
         #                                'int_tokens': int_tokens}
         return codeword.contiguous(), {'conditional_tokens': conditional_tokens}
 
-    def forward(self, gop, stage):
-        return self._coding_train(gop)
-        # match stage:
-        #     case 'coding':
-        #         return self._coding_train(gop)
-        #     case 'prediction':
-        #         return self._coding_train(gop)
-        #     case _:
-        #         raise ValueError
+    def _rated_codeword(self, codeword):
+        B = codeword.size(0)
+        codeword = codeword.view((B, *self.feat_dims))
+        int_tokens = get_trg_tokens(codeword, (*self.trg_w_pad, *self.trg_h_pad), self.c_win)
+        n_patches_h, n_patches_w = int_tokens.size(1), int_tokens.size(2)
+        int_tokens = int_tokens.view(B*n_patches_h*n_patches_w, -1, self.c_out)
+        # (B*n_patches_h*n_patches_w, c_win*c_win, C)
+
+    def forward(self, gop, predictor, stage):
+        codeword, code_aux = self._coding_train(gop)
+        match stage:
+            case 'coding':
+                return codeword, {}
+            case 'prediction':
+                q_pred, _ = predictor(code_aux['conditional_tokens'])
+                return codeword, {'q_pred': q_pred}
+            case 'fine_tune':
+                q_pred, q_pred_scaled = predictor(code_aux['conditional_tokens'])
+                return codeword, {'q_pred': q_pred,
+                                  'q_pred_scaled': q_pred_scaled}
 
     def __str__(self):
         return f'VCTBWEncoder({self.c_in},{self.c_feat},{self.c_out},{self.tf_layers},{self.tf_heads},{self.tf_ff},{self.tf_dropout})'
@@ -249,8 +260,6 @@ class VCTDecoderBandwidth(nn.Module):
 
         c_out = feat_dims[0]
         self.c_out = c_out
-        # self.feature_decoder = FeatureDecoderSimple(c_out, c_feat, c_in, reduced)
-        # self.auto_feature_encoder = FeatureEncoderSimple(c_in, c_feat, c_out, reduced)
         # self.feature_decoder = FeatureDecoder(c_out, c_feat, c_in, reduced)
         # self.auto_feature_encoder = FeatureEncoder(c_in, c_feat, c_out, reduced)
         self.feature_decoder = FeatureDecoderELIC(c_out, c_feat, c_in, reduced)
