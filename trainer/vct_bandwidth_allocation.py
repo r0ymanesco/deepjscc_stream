@@ -81,9 +81,9 @@ class VCTBandwidthAllocation(BaseTrainer):
         if len(params.comments) != 0: self.job_name += f'_Ref({params.comments})'
 
         if self.resume: self.load_weights()
-        # self.stage = 'prediction'
+        self.job_name += '_Rel'
         # self.coding_stage = self.epoch
-        # self.predictor_stage = self.coding_stage + 100
+        # self.predictor_stage = self.epoch + 1
 
     def _get_data(self, params):
         (train_loader, val_loader, eval_loader), dataset_aux = get_dataloader(params.dataset, params)
@@ -205,14 +205,14 @@ class VCTBandwidthAllocation(BaseTrainer):
                     target_frame = gop[-1]
                     code, encoder_aux = self.encoder(gop, self.predictor, self.stage)
 
-                    symbols = self.modem.modulate(code)
+                    symbols = self.modem.modulate(code, encoder_aux['channel_uses'])
 
                     rx_symbols, channel_aux = self.channel(symbols, snr)
                     epoch_postfix['snr'] = '{:.2f}'.format(channel_aux['channel_snr'])
 
                     demod_symbols = self.modem.demodulate(rx_symbols)
 
-                    frame_at_rate, _ = self.decoder(demod_symbols, decoder_ref, self.stage)
+                    frame_at_rate, _ = self.decoder(demod_symbols, decoder_ref, encoder_aux['channel_uses'], self.stage)
 
                     (loss, decoder_ref, batch_trackers) = self._get_loss(frame_at_rate, target_frame,
                                                                          decoder_ref, encoder_aux,
@@ -338,7 +338,6 @@ class VCTBandwidthAllocation(BaseTrainer):
                 epoch_postfix[f'prediction loss'] = '{:.5f}'.format(epoch_trackers['loss_hist'][-1])
             case 'fine_tune':
                 epoch_trackers['loss_hist'].append(np.nanmean(batch_trackers['batch_loss']))
-                # epoch_trackers['rate_loss_hist'].append(torch.cat(batch_trackers['batch_rate_loss'], dim=0).mean(0).detach())
                 epoch_postfix[f'comp loss'] = '{:.5f}'.format(epoch_trackers['loss_hist'][-1])
 
                 epoch_trackers['rate_hist'].extend(batch_trackers['batch_rate'])
@@ -399,25 +398,19 @@ class VCTBandwidthAllocation(BaseTrainer):
                 loss = F.l1_loss(q_pred, rate_dist_loss)
                 batch_trackers['batch_loss'].append(loss.item())
             case 'fine_tune':
-                # FIXME channel codeword in this phase should include codewords from future frames,
-                # this ensures the power normalisation is fair
-
                 rate_dist_loss, _ = calc_loss(predictions, target, self.loss, 'batch')
                 # batch_trackers['batch_rate_loss'].append(rate_dist_loss.detach())
 
-                q_pred, q_pred_scaled = encoder_aux['q_pred'], encoder_aux['q_pred_scaled']
+                q_pred = encoder_aux['q_pred']
 
-                (rate_indices,
-                target_rate_frames) = get_rate_index(q_pred_scaled, self.target_quality, frame_at_rate)
-                next_ref_frame = target_rate_frames.detach()
+                batch_rate_indices = encoder_aux['rate_indices']
+                next_ref_frame = predictions.detach()
 
-                predicted_frames = [target_rate_frames]
+                predicted_frames = [predictions]
                 target_frames = [target_frame]
 
-                batch_rate_indices = torch.stack(rate_indices, dim=0)
-                dist_loss_at_rate = torch.gather(rate_dist_loss, 1, batch_rate_indices)
                 pred_loss = F.l1_loss(q_pred, rate_dist_loss)
-                loss = dist_loss_at_rate.mean() + self.fine_tune_loss_lmda * pred_loss
+                loss = rate_dist_loss.mean() + self.fine_tune_loss_lmda * pred_loss
                 batch_trackers['batch_loss'].append(loss.item())
 
                 batch_avg_rate = (batch_rate_indices.to(torch.float).mean() * self.ch_uses_per_token) / self.frame_dim
@@ -442,10 +435,21 @@ class VCTBandwidthAllocation(BaseTrainer):
     def _update_loss_modulator(self, rate_loss_mean):
         match self.loss:
             case 'l2':
-                mod_mask = torch.gt(rate_loss_mean * 1.5, self.rate_loss_old)
+                rates = torch.arange(self.n_rates).to(rate_loss_mean.device)
+                top_rate = torch.index_select(rate_loss_mean, 1, rates[-1])
+
+                reverse_rate_loss = torch.fliplr(rate_loss_mean)
+                backward_diff = torch.diff(reverse_rate_loss, dim=1, prepend=top_rate)
+                forward_diff = torch.fliplr(backward_diff)
+
+                mod_mask = torch.gt(forward_diff, rate_loss_mean * 0.2)
                 mod_gain = (2 * mod_mask.to(torch.float) - 1) * self.loss_modulator_lmda
                 self.loss_weights += mod_gain
-                self.rate_loss_old = rate_loss_mean.clone().detach()
+
+                # lower_rates = torch.index_select(rate_loss_mean, 1, rates[:-1])
+                # mod_mask = torch.gt(lower_rates, top_rate * 1.5)
+                # mod_mask = torch.gt(rate_loss_mean * 1.5, self.rate_loss_old)
+                # self.rate_loss_old = rate_loss_mean.clone().detach()
             case _:
                 raise NotImplementedError
         self.loss_weights.clamp(1., 10.)
@@ -590,8 +594,8 @@ class VCTBandwidthAllocation(BaseTrainer):
         return state_dict
 
     def load_state_dict(self, state_dict):
-        self.loss_weights = state_dict['loss_weights']
-        self.rate_loss_old = state_dict['rate_loss_old']
+        # self.loss_weights = state_dict['loss_weights'].to(self.device)
+        self.rate_loss_old = state_dict['rate_loss_old'].to(self.device)
 
     @staticmethod
     def get_parser(parser):

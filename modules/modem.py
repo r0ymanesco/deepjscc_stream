@@ -21,8 +21,8 @@ class Modem(nn.Module):
                 raise NotImplementedError
         return modem
 
-    def modulate(self, message):
-        return self.modem.modulate(message)
+    def modulate(self, message, *args, **kwargs):
+        return self.modem.modulate(message, *args, **kwargs)
 
     def demodulate(self, symbols):
         return self.modem.demodulate(symbols)
@@ -36,11 +36,15 @@ class ContinuousModem(nn.Module):
         super().__init__()
         self.avg_power = avg_power
 
-    def modulate(self, message):
+    def modulate(self, message, channel_uses=None):
         B = message.size(0)
         x = torch.view_as_complex(message.view(B, -1, 2))
-        k = x.size(1)
-        modulated = F.normalize(x) * np.sqrt(k*self.avg_power)
+
+        if channel_uses is None:
+            k = torch.tensor([x.size(1)]).to(x.device)
+        else:
+            k = channel_uses.to(x.device)
+        modulated = F.normalize(x) * torch.sqrt(k*self.avg_power)
         return modulated
 
     def demodulate(self, symbols):
