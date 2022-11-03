@@ -80,8 +80,8 @@ class VCTBandwidthAllocation(BaseTrainer):
 
         if len(params.comments) != 0: self.job_name += f'_Ref({params.comments})'
 
+        # self.job_name += 'R'
         if self.resume: self.load_weights()
-        self.job_name += '_Rel'
         # self.coding_stage = self.epoch
         # self.predictor_stage = self.epoch + 1
 
@@ -176,7 +176,7 @@ class VCTBandwidthAllocation(BaseTrainer):
             'rate_hist': [],
         }
 
-        with tqdm(self.loader, unit='batch') as tepoch:
+        with tqdm(self.loader, unit='batch', bar_format='{l_bar}{bar:10}{r_bar}') as tepoch:
             for batch_idx, (frames, vid_fns) in enumerate(tepoch):
                 pbar_desc = f'epoch: {self.epoch}, {self.mode} [{self.stage}]'
                 tepoch.set_description(pbar_desc)
@@ -435,6 +435,7 @@ class VCTBandwidthAllocation(BaseTrainer):
     def _update_loss_modulator(self, rate_loss_mean):
         match self.loss:
             case 'l2':
+                # NOTE Depends on change in loss consecutive rates
                 rates = torch.arange(self.n_rates).to(rate_loss_mean.device)
                 top_rate = torch.index_select(rate_loss_mean, 1, rates[-1])
 
@@ -446,13 +447,20 @@ class VCTBandwidthAllocation(BaseTrainer):
                 mod_gain = (2 * mod_mask.to(torch.float) - 1) * self.loss_modulator_lmda
                 self.loss_weights += mod_gain
 
+                # NOTE Depends on change in loss between top rate and lower rates
                 # lower_rates = torch.index_select(rate_loss_mean, 1, rates[:-1])
                 # mod_mask = torch.gt(lower_rates, top_rate * 1.5)
+                # mod_gain = (2 * mod_mask.to(torch.float) - 1) * self.loss_modulator_lmda
+                # self.loss_weights += mod_gain
+
+                # NOTE Depends on change in loss for a given rate
                 # mod_mask = torch.gt(rate_loss_mean * 1.5, self.rate_loss_old)
+                # mod_gain = (2 * mod_mask.to(torch.float) - 1) * self.loss_modulator_lmda
+                # self.loss_weights += mod_gain
                 # self.rate_loss_old = rate_loss_mean.clone().detach()
             case _:
                 raise NotImplementedError
-        self.loss_weights.clamp(1., 10.)
+        self.loss_weights = torch.clamp(self.loss_weights, 1, 10).detach()
         print(self.loss_weights)
 
     def _update_es(self, loss):
@@ -594,7 +602,7 @@ class VCTBandwidthAllocation(BaseTrainer):
         return state_dict
 
     def load_state_dict(self, state_dict):
-        # self.loss_weights = state_dict['loss_weights'].to(self.device)
+        self.loss_weights = state_dict['loss_weights'].to(self.device)
         self.rate_loss_old = state_dict['rate_loss_old'].to(self.device)
 
     @staticmethod
