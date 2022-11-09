@@ -150,15 +150,15 @@ class VCTEncoderBandwidth(nn.Module):
         z_0 = self.feature_encoder(frames)
         return z_0, {}
 
-    def _coding_train(self, gop):
-        B = gop[0].size(0)
-        n_prev_tokens = len(gop) - 1
+    def _coding_train(self, frame, ref_feats):
+        B = frame.size(0)
+        n_prev_tokens = len(ref_feats)
 
-        batch_int_frames = torch.cat(gop, dim=0)
-        batch_y = self.feature_encoder(batch_int_frames)
-        prev_y, int_y = torch.split(batch_y, [B*n_prev_tokens, B], dim=0)
+        int_y = self.feature_encoder(frame)
         # FIXME do channel emulation for reference frames
 
+        prev_y = torch.cat(ref_feats, dim=0)
+        # prev_y = self.feature_encoder(prev_y)
         prev_tokens = get_src_tokens(prev_y, (*self.src_w_pad, *self.src_h_pad), self.p_win, self.c_win)
         # (B*n_prev_tokens, n_patches_h, n_patches_w, p_win, p_win, C)
 
@@ -186,10 +186,10 @@ class VCTEncoderBandwidth(nn.Module):
         # (B, c_win*c_win, n_patches_h, n_patches_w, C)
 
         rated_codewords, channel_uses = self._rated_codeword(restored_decoder_out)
-        # return codeword.contiguous(), {'prev_tokens': prev_tokens,
-        #                                'int_tokens': int_tokens}
         return rated_codewords, {'conditional_tokens': conditional_tokens,
-                                 'channel_uses': channel_uses}
+                                 'prev_tokens': prev_tokens,
+                                 'channel_uses': channel_uses,
+                                 'next_ref_feat': int_y.detach()}
 
     def _rated_codeword(self, restored_decoder_out):
         B = restored_decoder_out.size(0)
@@ -204,7 +204,8 @@ class VCTEncoderBandwidth(nn.Module):
                                             self.c_win, self.c_win, self.c_out)
 
         ch_uses_per_token = n_patches_h * n_patches_w * self.c_out // 2
-        channel_uses = torch.arange(ch_uses_per_token, ch_uses_per_token*(self.c_win**2)+1, ch_uses_per_token)
+        channel_uses = torch.arange(ch_uses_per_token, ch_uses_per_token*(self.c_win**2)+1, ch_uses_per_token,
+                                    device=rated_codewords.device)
         batched_channel_uses = torch.repeat_interleave(channel_uses, B).view(-1, 1)
         return rated_codewords.contiguous(), batched_channel_uses
 
@@ -218,26 +219,25 @@ class VCTEncoderBandwidth(nn.Module):
         batched_channel_uses = rate_indices * ch_uses_per_token
         return target_rate_codewords.contiguous(), batched_channel_uses, rate_indices
 
-    def forward(self, gop, predictor, stage):
-        # H_out, W_out = (self.feat_dims[1] + sum(self.trg_h_pad)), (self.feat_dims[2] + sum(self.trg_w_pad))
-        rated_codewords, code_aux = self._coding_train(gop)
+    def forward(self, frame, encoder_ref, predictor, stage):
+        rated_codewords, code_aux = self._coding_train(frame, encoder_ref)
+        encoder_ref = [encoder_ref[(i + 1) % len(encoder_ref)]
+                        for i, _ in enumerate(encoder_ref)]
+        encoder_ref[-1] = code_aux['next_ref_feat']
         match stage:
             case 'coding':
-                # rated_codewords = restore_shape(rated_codewords, (H_out, W_out), self.c_win)
-                # rated_codewords = torch.split(rated_codewords, [self.feat_dims[1], H_out - self.feat_dims[1]], dim=2)[0]
-                # rated_codewords = torch.split(rated_codewords, [self.feat_dims[2], W_out - self.feat_dims[2]], dim=3)[0]
-                return rated_codewords.contiguous(), {'channel_uses': code_aux['channel_uses']}
+                return rated_codewords.contiguous(), encoder_ref, {'channel_uses': code_aux['channel_uses']}
             case 'prediction':
-                q_pred, _ = predictor(code_aux['conditional_tokens'])
-                return rated_codewords.contiguous(), {'q_pred': q_pred,
-                                                      'channel_uses': code_aux['channel_uses']}
+                q_pred, _ = predictor(code_aux['conditional_tokens'], code_aux['prev_tokens'])
+                return rated_codewords.contiguous(), encoder_ref, {'q_pred': q_pred,
+                                                                   'channel_uses': code_aux['channel_uses']}
             case 'fine_tune':
-                q_pred, q_pred_scaled = predictor(code_aux['conditional_tokens'])
+                q_pred, q_pred_scaled = predictor(code_aux['conditional_tokens'], code_aux['prev_tokens'])
                 rated_codewords, batched_channel_uses, rate_indices = self._predicted_codeword(rated_codewords, q_pred_scaled)
-                return rated_codewords.contiguous(), {'q_pred': q_pred,
-                                                      'q_pred_scaled': q_pred_scaled,
-                                                      'channel_uses': batched_channel_uses,
-                                                      'rate_indices': rate_indices}
+                return rated_codewords.contiguous(), encoder_ref, {'q_pred': q_pred,
+                                                                   'q_pred_scaled': q_pred_scaled,
+                                                                   'channel_uses': batched_channel_uses,
+                                                                   'rate_indices': rate_indices}
 
     def __str__(self):
         return f'VCTBWEncoder({self.c_in},{self.c_feat},{self.c_out},{self.tf_layers},{self.tf_heads},{self.tf_ff},{self.tf_dropout})'
@@ -270,7 +270,7 @@ class VCTDecoderBandwidth(nn.Module):
         # self.feature_decoder = FeatureDecoder(c_out, c_feat, c_in, reduced)
         # self.auto_feature_encoder = FeatureEncoder(c_in, c_feat, c_out, reduced)
         self.feature_decoder = FeatureDecoderELIC(c_out, c_feat, c_in, reduced)
-        self.auto_feature_encoder = FeatureEncoderELIC(c_in, c_feat, c_out, reduced)
+        # self.auto_feature_encoder = FeatureEncoderELIC(c_in, c_feat, c_out, reduced)
 
         tf_encoder_layer = nn.TransformerEncoderLayer(c_out, tf_heads, tf_ff, tf_dropout, batch_first=True)
         self.tf_encoder_sep = nn.TransformerEncoder(tf_encoder_layer, num_layers=tf_layers[0])
@@ -287,19 +287,19 @@ class VCTDecoderBandwidth(nn.Module):
         gop = torch.chunk(frames, chunks=gop_len, dim=0)
         return gop, {}
 
-    def _coding_train(self, int_tokens, prev_frames):
+    def _coding_train(self, int_tokens, prev_feats):
         B = int_tokens.size(0)
-        _B = prev_frames[0].size(0)
+        _B = prev_feats[0].size(0)
         repeat_factor = B // _B
-        n_prev_tokens = len(prev_frames)
+        n_prev_tokens = len(prev_feats)
         H_out, W_out = (self.feat_dims[1] + sum(self.trg_h_pad)), (self.feat_dims[2] + sum(self.trg_w_pad))
         n_patches_h, n_patches_w = int_tokens.size(1), int_tokens.size(2)
         decoder_input = int_tokens.view(B*n_patches_h*n_patches_w, self.c_win**2, self.c_out)
 
-        batch_prev_frames = torch.cat(prev_frames, dim=0)
-        prev_y = self.auto_feature_encoder(batch_prev_frames)
+        batch_prev_feats = torch.cat(prev_feats, dim=0)
 
-        prev_tokens = get_src_tokens(prev_y, (*self.src_w_pad, *self.src_h_pad), self.p_win, self.c_win)
+        prev_tokens = get_src_tokens(batch_prev_feats,
+                                     (*self.src_w_pad, *self.src_h_pad), self.p_win, self.c_win)
         # (B*n_prev_tokens, n_patches_h, n_patches_w, p_win, p_win, C)
         sep_input = prev_tokens.view(-1, self.p_win**2, self.c_out)
         sep_output = self.tf_encoder_sep(sep_input)
@@ -319,7 +319,7 @@ class VCTDecoderBandwidth(nn.Module):
         y_feat = torch.split(y_feat, [self.feat_dims[1], H_out - self.feat_dims[1]], dim=2)[0]
         y_feat = torch.split(y_feat, [self.feat_dims[2], W_out - self.feat_dims[2]], dim=3)[0]
         frames = torch.sigmoid(self.feature_decoder(y_feat))
-        return frames, {}
+        return frames, {'tf_decoder_out': y_feat.detach()}
 
     def _process_codeword(self, codes, batch_channel_uses):
         # NOTE it is more efficient to concatenate the tokens from all rates instead of creating separate batches
@@ -334,34 +334,59 @@ class VCTDecoderBandwidth(nn.Module):
         int_tokens = codes.view(B, n_patches_h, n_patches_w, self.c_win**2, self.c_out)
         # (B, n_patches_h, n_patches_w, c_win*c_win, C)
 
-        padding_tokens = torch.zeros_like(int_tokens[:1])
-        padding_tokens = list(torch.chunk(padding_tokens, chunks=self.c_win**2, dim=3))
+        # padding_tokens = torch.zeros_like(int_tokens[:1])
+        # padding_tokens = list(torch.chunk(padding_tokens, chunks=self.c_win**2, dim=3))
 
-        int_tokens = torch.chunk(int_tokens, chunks=B, dim=0)
-        rate_uses = torch.chunk(batch_rate_uses, chunks=B, dim=0)
+        rate_indices = torch.tile(torch.arange(self.c_win**2, device=codes.device).view(1, -1), (B, 1))
+        rate_mask = torch.ge(rate_indices, batch_rate_uses)
+        rate_mask = torch.repeat_interleave(rate_mask.view(B, 1, 1, -1, 1), n_patches_h, dim=1)
+        rate_mask = torch.repeat_interleave(rate_mask, n_patches_w, dim=2)
 
-        processed_codewords = []
-        for (tokens, rate) in zip(int_tokens, rate_uses):
-            rate = int(rate.view(-1).item())
-            code = torch.split(tokens, [rate, self.c_win**2-rate], dim=3)[0]
-            padding = padding_tokens[:(self.c_win**2-rate)]
-            codeword = torch.cat((code, *padding), dim=3)
-            processed_codewords.append(codeword)
-        processed_codewords = torch.cat(processed_codewords, dim=0)
+        processed_codewords = int_tokens.masked_fill_(rate_mask, 0)
+
+        # int_tokens = torch.chunk(int_tokens, chunks=B, dim=0)
+        # rate_uses = torch.chunk(batch_rate_uses, chunks=B, dim=0)
+
+        # processed_codewords = []
+        # for (tokens, rate) in zip(int_tokens, rate_uses):
+        #     rate = int(rate.view(-1).item())
+        #     code = torch.split(tokens, [rate, self.c_win**2-rate], dim=3)[0]
+        #     padding = padding_tokens[:(self.c_win**2-rate)]
+        #     codeword = torch.cat((code, *padding), dim=3)
+        #     processed_codewords.append(codeword)
+        # processed_codewords = torch.cat(processed_codewords, dim=0)
         return processed_codewords.contiguous()
 
-    def forward(self, codes, prev_frames, batch_channel_uses, stage):
+    def _get_next_ref(self, frame_at_rate, y_feat_at_rate):
+        rand_i = np.random.randint(len(frame_at_rate))
+        random_ref = frame_at_rate[rand_i]
+        next_ref_frame = random_ref.detach()
+        next_ref_feat = y_feat_at_rate[rand_i]
+        return next_ref_frame, next_ref_feat
+
+    def forward(self, codes, decoder_ref, batch_channel_uses, stage):
+    # def forward(self, codes, prev_frames, batch_channel_uses, stage):
         processed_codewords = self._process_codeword(codes, batch_channel_uses)
-        frames, _ = self._coding_train(processed_codewords, prev_frames)
+        frames, coding_aux = self._coding_train(processed_codewords, decoder_ref)
+
+        decoder_ref = [decoder_ref[(i + 1) % len(decoder_ref)]
+                        for i, _ in enumerate(decoder_ref)]
         match stage:
             case 'coding':
-                frames_at_rate = torch.chunk(frames, chunks=self.c_win**2, dim=0)
-                return frames_at_rate, {}
+                frame_at_rate = torch.chunk(frames, chunks=self.c_win**2, dim=0)
+                y_feat_at_rate = torch.chunk(coding_aux['tf_decoder_out'], chunks=self.c_win**2, dim=0)
+                next_ref_frame, next_ref_feat = self._get_next_ref(frame_at_rate, y_feat_at_rate)
+                decoder_ref[-1] = next_ref_feat
+                return frame_at_rate, decoder_ref, {'next_ref_frame': next_ref_frame}
             case 'prediction':
-                frames_at_rate = torch.chunk(frames, chunks=self.c_win**2, dim=0)
-                return frames_at_rate, {}
+                frame_at_rate = torch.chunk(frames, chunks=self.c_win**2, dim=0)
+                y_feat_at_rate = torch.chunk(coding_aux['tf_decoder_out'], chunks=self.c_win**2, dim=0)
+                next_ref_frame, next_ref_feat = self._get_next_ref(frame_at_rate, y_feat_at_rate)
+                decoder_ref[-1] = next_ref_feat
+                return frame_at_rate, decoder_ref, {'next_ref_frame': next_ref_frame}
             case 'fine_tune':
-                return [frames], {}
+                decoder_ref[-1] = coding_aux['tf_decoder_out']
+                return [frames], decoder_ref, {'next_ref_frame': frames.detach()}
             case _:
                 raise ValueError
 

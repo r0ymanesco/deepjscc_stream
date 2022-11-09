@@ -111,6 +111,7 @@ class VCTBandwidthAllocation(BaseTrainer):
     def _get_encoder(self, params, frame_sizes, reduced_arch):
         down_factor = FeatureEncoder.get_config(reduced_arch)
         feat_dims = (params.c_out, *[dim // down_factor for dim in frame_sizes[1:]])
+        self.feat_dims = feat_dims
         encoder = VCTEncoderBandwidth(
             c_in=params.c_in,
             c_feat=params.c_feat,
@@ -197,13 +198,19 @@ class VCTBandwidthAllocation(BaseTrainer):
                 frames = list(torch.chunk(frames.to(self.device), chunks=n_frames, dim=1))
                 frames = [torch.zeros_like(frames[0])] * self.n_conditional_frames + frames
 
-                gop_struct, gop_len = self._get_gop_struct(n_frames+self.n_conditional_frames)
+                # gop_struct, gop_len = self._get_gop_struct(n_frames+self.n_conditional_frames)
 
-                decoder_ref = [torch.zeros_like(frames[0])] * self.n_conditional_frames
-                for (f_start, f_end) in zip(gop_struct[:-gop_len], gop_struct[gop_len:]):
-                    gop = frames[f_start:f_end]
-                    target_frame = gop[-1]
-                    code, encoder_aux = self.encoder(gop, self.predictor, self.stage)
+                B = frames[0].size(0)
+                encoder_ref = [torch.zeros((B, *self.feat_dims)).to(self.device)] * self.n_conditional_frames
+                decoder_ref = [torch.zeros((B, *self.feat_dims)).to(self.device)] * self.n_conditional_frames
+                for target_frame in frames:
+                # for (f_start, f_end) in zip(gop_struct[:-gop_len], gop_struct[gop_len:]):
+                    # gop = frames[f_start:f_end]
+                    # encoder_ref = gop[:2]
+                    # target_frame = gop[-1]
+
+                    code, encoder_ref, encoder_aux = self.encoder(target_frame, encoder_ref,
+                                                                  self.predictor, self.stage)
 
                     symbols = self.modem.modulate(code, encoder_aux['channel_uses'])
 
@@ -212,11 +219,11 @@ class VCTBandwidthAllocation(BaseTrainer):
 
                     demod_symbols = self.modem.demodulate(rx_symbols)
 
-                    frame_at_rate, _ = self.decoder(demod_symbols, decoder_ref, encoder_aux['channel_uses'], self.stage)
+                    frame_at_rate, decoder_ref, _ = self.decoder(demod_symbols, decoder_ref,
+                                                                 encoder_aux['channel_uses'], self.stage)
 
-                    (loss, decoder_ref, batch_trackers) = self._get_loss(frame_at_rate, target_frame,
-                                                                         decoder_ref, encoder_aux,
-                                                                         batch_trackers)
+                    (loss, batch_trackers) = self._get_loss(frame_at_rate, target_frame,
+                                                            encoder_aux, batch_trackers)
 
                     if self._training:
                         self.optimizer.zero_grad()
@@ -356,7 +363,7 @@ class VCTBandwidthAllocation(BaseTrainer):
                 raise ValueError
         return epoch_trackers, epoch_postfix
 
-    def _get_loss(self, frame_at_rate, target_frame, decoder_ref, encoder_aux, batch_trackers):
+    def _get_loss(self, frame_at_rate, target_frame, encoder_aux, batch_trackers):
         predictions = torch.stack(frame_at_rate, dim=1)
         target = torch.stack([target_frame]*len(frame_at_rate), dim=1)
 
@@ -368,10 +375,6 @@ class VCTBandwidthAllocation(BaseTrainer):
                 batch_trackers['batch_loss'].append(dist_loss_mean.item())
                 batch_trackers['batch_rate_loss'].append(rate_dist_loss.clone().detach())
                 batch_trackers['top_rate_loss'].append(rate_dist_loss[:, -1].mean().item())
-
-                rand_i = np.random.randint(len(frame_at_rate))
-                random_ref = frame_at_rate[rand_i]
-                next_ref_frame = random_ref.detach()
 
                 predicted_frames = frame_at_rate
                 target_frames = [target_frame] * len(frame_at_rate)
@@ -390,21 +393,15 @@ class VCTBandwidthAllocation(BaseTrainer):
             case 'prediction':
                 rate_dist_loss, _ = calc_loss(predictions, target, self.loss, 'batch')
 
-                rand_i = np.random.randint(len(frame_at_rate))
-                random_ref = frame_at_rate[rand_i]
-                next_ref_frame = random_ref.detach()
-
                 q_pred = encoder_aux['q_pred']
                 loss = F.l1_loss(q_pred, rate_dist_loss)
                 batch_trackers['batch_loss'].append(loss.item())
             case 'fine_tune':
                 rate_dist_loss, _ = calc_loss(predictions, target, self.loss, 'batch')
-                # batch_trackers['batch_rate_loss'].append(rate_dist_loss.detach())
 
                 q_pred = encoder_aux['q_pred']
 
                 batch_rate_indices = encoder_aux['rate_indices']
-                next_ref_frame = predictions.detach()
 
                 predicted_frames = [predictions]
                 target_frames = [target_frame]
@@ -426,11 +423,7 @@ class VCTBandwidthAllocation(BaseTrainer):
             case _:
                 raise ValueError
 
-        decoder_ref = [decoder_ref[(i + 1) % len(decoder_ref)]
-                        for i, _ in enumerate(decoder_ref)]
-        decoder_ref[-1] = next_ref_frame
-
-        return loss, decoder_ref, batch_trackers
+        return loss, batch_trackers
 
     def _update_loss_modulator(self, rate_loss_mean):
         match self.loss:
