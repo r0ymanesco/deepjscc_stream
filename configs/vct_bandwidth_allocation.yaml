@@ -1,7 +1,7 @@
 loss: 'l2'
 train_epochs: 600
 save_dir: 'checkpoints/vct_bw_allocation'
-coding_stage: 200
+coding_stage: 20
 predictor_stage: 400
 
 dataset:
@@ -23,6 +23,7 @@ scheduler:
 
 encoder:
   target_quality: 25.0 # db psnr
+  use_entropy: False
   n_conditional_frames: 2
   c_in: 3
   c_feat: 192

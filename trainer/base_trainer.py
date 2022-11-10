@@ -17,6 +17,11 @@ class BaseTrainer:
     def _set_mode(self):
         raise NotImplementedError()
 
+    def _update_params(self, loss):
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+
     def training(self):
         self.mode = 'train'
         self._training = True

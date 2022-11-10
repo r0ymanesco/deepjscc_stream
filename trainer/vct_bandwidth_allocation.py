@@ -9,6 +9,8 @@ import torch
 import torch.utils.data as data
 import torch.nn.functional as F
 
+from compressai.models import FactorizedPrior
+
 from trainer.base_trainer import BaseTrainer
 
 from modules.modem import Modem
@@ -32,15 +34,18 @@ class VCTBandwidthAllocation(BaseTrainer):
 
         self.coding_stage = params.coding_stage
         self.predictor_stage = params.predictor_stage
+
+        self.use_entropy = params.encoder.use_entropy
         self.target_quality = params.encoder.target_quality
         self.n_conditional_frames = params.encoder.n_conditional_frames
+
         self.fine_tune_loss_lmda = params.optimizer.fine_tune_loss_lmda
         self.loss_modulator_lmda = params.optimizer.loss_modulator_lmda
 
         self._get_config(params)
 
     def _get_config(self, params):
-        self.job_name = f'{self.trainer}({self.loss},{self.coding_stage})'
+        self.job_name = f'{self.trainer}({self.loss},{self.use_entropy})'
 
         (self.train_loader,
          self.val_loader,
@@ -49,9 +54,9 @@ class VCTBandwidthAllocation(BaseTrainer):
 
         self.encoder, self.decoder, self.predictor = self._get_encoder(
             params.encoder, dataset_aux['frame_sizes'], dataset_aux['reduced_arch'])
-        self.ch_uses_per_token = self.predictor.ch_uses_per_token
-        self.n_rates = self.predictor.n_rates
-        self.loss_weights = torch.ones(1, self.n_rates, device=self.device) * 1.
+        self.ch_uses_per_token = self.encoder.ch_uses_per_token
+        self.n_rates = params.encoder.c_win**2
+        self.loss_weights = torch.ones(1, self.n_rates, device=self.device)
         self.rate_loss_old = torch.zeros(1, self.n_rates, device=self.device)
 
         self.modem = self._get_modem(params.modem)
@@ -124,6 +129,7 @@ class VCTBandwidthAllocation(BaseTrainer):
             tf_ff=params.tf_ff,
             tf_dropout=params.tf_dropout,
             target_quality=params.target_quality,
+            use_entropy=params.use_entropy
         ).to(self.device)
         decoder = VCTDecoderBandwidth(
             c_in=params.c_in,
@@ -145,9 +151,10 @@ class VCTBandwidthAllocation(BaseTrainer):
             tf_layers=params.tf_layers,
             tf_heads=params.tf_heads,
             tf_ff=params.tf_ff,
-            tf_dropout=params.tf_dropout
+            tf_dropout=params.tf_dropout,
+            use_entropy=params.use_entropy
         ).to(self.device)
-        self.job_name += '_' + str(encoder) + '_' + str(decoder)
+        self.job_name += '_' + str(encoder)
         return encoder, decoder, predictor
 
     def _get_modem(self, params):
@@ -196,8 +203,8 @@ class VCTBandwidthAllocation(BaseTrainer):
 
                 n_frames = frames.size(1) // 3
                 frames = list(torch.chunk(frames.to(self.device), chunks=n_frames, dim=1))
-                frames = [torch.zeros_like(frames[0])] * self.n_conditional_frames + frames
 
+                # frames = [torch.zeros_like(frames[0])] * self.n_conditional_frames + frames
                 # gop_struct, gop_len = self._get_gop_struct(n_frames+self.n_conditional_frames)
 
                 B = frames[0].size(0)
@@ -225,10 +232,7 @@ class VCTBandwidthAllocation(BaseTrainer):
                     (loss, batch_trackers) = self._get_loss(frame_at_rate, target_frame,
                                                             encoder_aux, batch_trackers)
 
-                    if self._training:
-                        self.optimizer.zero_grad()
-                        loss.backward()
-                        self.optimizer.step()
+                    if self._training: self._update_params(loss)
 
                 epoch_trackers, epoch_postfix = self._update_epoch_postfix(batch_trackers,
                                                                            epoch_trackers,
@@ -276,7 +280,7 @@ class VCTBandwidthAllocation(BaseTrainer):
                             'msssim_mean': msssim_mean,
                             'top_r_msssim_mean': top_rate_msssim_mean,
                         }
-                        self._update_loss_modulator(rate_loss_mean.unsqueeze(0))
+                        # self._update_loss_modulator(rate_loss_mean.unsqueeze(0))
 
                     elif self._evaluate:
                         return_aux = {
@@ -391,25 +395,31 @@ class VCTBandwidthAllocation(BaseTrainer):
                     batch_trackers['batch_msssim'].extend(frame_msssim)
                     batch_trackers['top_rate_msssim'].extend(calc_msssim([frame_at_rate[-1]], [target_frame]))
             case 'prediction':
-                rate_dist_loss, _ = calc_loss(predictions, target, self.loss, 'batch')
-
-                q_pred = encoder_aux['q_pred']
-                loss = F.l1_loss(q_pred, rate_dist_loss)
+                if self.use_entropy:
+                    likelihoods = encoder_aux['q_pred']
+                    loss = -torch.log2(likelihoods + 1e-6).sum(-1).mean()
+                else:
+                    rate_dist_loss, _ = calc_loss(predictions, target, self.loss, 'batch')
+                    q_pred = encoder_aux['q_pred']
+                    loss = F.l1_loss(q_pred, rate_dist_loss)
                 batch_trackers['batch_loss'].append(loss.item())
             case 'fine_tune':
                 rate_dist_loss, _ = calc_loss(predictions, target, self.loss, 'batch')
 
-                q_pred = encoder_aux['q_pred']
-
-                batch_rate_indices = encoder_aux['rate_indices']
-
                 predicted_frames = [predictions]
                 target_frames = [target_frame]
 
-                pred_loss = F.l1_loss(q_pred, rate_dist_loss)
-                loss = rate_dist_loss.mean() + self.fine_tune_loss_lmda * pred_loss
+                if self.use_entropy:
+                    likelihoods = encoder_aux['q_pred']
+                    likelihood_loss = -torch.log2(likelihoods).sum(-1).mean()
+                    loss = rate_dist_loss.mean() + self.fine_tune_loss_lmda * likelihood_loss
+                else:
+                    q_pred = encoder_aux['q_pred']
+                    pred_loss = F.l1_loss(q_pred, rate_dist_loss)
+                    loss = rate_dist_loss.mean() + self.fine_tune_loss_lmda * pred_loss
                 batch_trackers['batch_loss'].append(loss.item())
 
+                batch_rate_indices = encoder_aux['rate_indices']
                 batch_avg_rate = (batch_rate_indices.to(torch.float).mean() * self.ch_uses_per_token) / self.frame_dim
                 batch_trackers['batch_rate'].append(batch_avg_rate.item())
 
@@ -622,8 +632,10 @@ class VCTBandwidthAllocation(BaseTrainer):
         parser.add_argument('--scheduler.scheduler', type=str, help='scheduler: scheduler to use')
         parser.add_argument('--scheduler.lr_schedule_factor', type=float, help='scheduler: multi_lr: reduction factor')
 
-        parser.add_argument('--encoder.target_quality', type=float, help='encoder: target frame quality (defined by train loss)')
         parser.add_argument('--encoder.n_conditional_frames', type=int, help='encoder: number past conditional frames')
+        parser.add_argument('--encoder.target_quality', type=float, help='encoder: target frame quality or entropy cutoff (defined by train loss)')
+        parser.add_argument('--encoder.use_entropy', action='store_true', help='encoder: to use frame entropy for rate estimation')
+        # parser.add_argument('--encoder.entropy_cutoff', type=float, help='encoder: entropy-based bandwidth reduction cutoff')
         parser.add_argument('--encoder.c_in', type=int, help='encoder: number of input channels')
         parser.add_argument('--encoder.c_feat', type=int, help='encoder: number of feature channels')
         parser.add_argument('--encoder.c_out', type=int, help='encoder: number of output channels')

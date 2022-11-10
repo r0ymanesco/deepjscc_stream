@@ -93,13 +93,15 @@ def get_rate_index(q_pred, target_q, codeword_at_rate):
 class VCTEncoderBandwidth(nn.Module):
     def __init__(self, c_in, c_feat, feat_dims, reduced, c_win, p_win,
                  tf_layers, tf_heads, tf_ff, tf_dropout=0.,
-                 target_quality=np.inf):
+                 target_quality=np.inf, use_entropy=False):
         super().__init__()
+        self.target_quality = target_quality
+        self.use_entropy = use_entropy
+
         self.c_in = c_in
         self.c_feat = c_feat
         self.feat_dims = feat_dims
         self.reduced = reduced
-        self.target_quality = target_quality
 
         self.c_win = c_win
         self.p_win = p_win
@@ -112,14 +114,14 @@ class VCTEncoderBandwidth(nn.Module):
         self.trg_h_pad, self.trg_w_pad = get_pad(self.feat_dims[1], self.feat_dims[2], c_win)
         self.src_h_pad = [pad + ((p_win - c_win) // 2) for pad in self.trg_h_pad]
         self.src_w_pad = [pad + ((p_win - c_win) // 2) for pad in self.trg_w_pad]
-        # self.n_patches_h = (self.feat_dims[1] + sum(self.trg_h_pad)) // c_win
-        # self.n_patches_w = (self.feat_dims[2] + sum(self.trg_w_pad)) // c_win
+        self.n_patches_h = (self.feat_dims[1] + sum(self.trg_h_pad)) // c_win
+        self.n_patches_w = (self.feat_dims[2] + sum(self.trg_w_pad)) // c_win
 
         c_out = feat_dims[0]
         self.c_out = c_out
-        # self.feature_encoder = FeatureEncoderSimple(c_in, c_feat, c_out, reduced)
         # self.feature_encoder = FeatureEncoder(c_in, c_feat, c_out, reduced)
         self.feature_encoder = FeatureEncoderELIC(c_in, c_feat, c_out, reduced)
+        self.ch_uses_per_token = self.n_patches_h * self.n_patches_w * c_out // 2
 
         tf_encoder_layer = nn.TransformerEncoderLayer(c_out, tf_heads, tf_ff, tf_dropout, batch_first=True)
         self.tf_encoder_sep = nn.TransformerEncoder(tf_encoder_layer, num_layers=tf_layers[0])
@@ -182,11 +184,11 @@ class VCTEncoderBandwidth(nn.Module):
         tf_decoder_out = self.tf_decoder(int_tokens, tf_encoder_out, tgt_mask=trg_mask)
         # (B*n_patches_h*n_patches_w, c_win*c_win, C)
         restored_decoder_out = tf_decoder_out.view(B, n_patches_h, n_patches_w, self.c_win*self.c_win, self.c_out)
-        conditional_tokens = restored_decoder_out.permute(0, 3, 1, 2, 4).contiguous()
+        # conditional_tokens = restored_decoder_out.permute(0, 3, 1, 2, 4).contiguous()
         # (B, c_win*c_win, n_patches_h, n_patches_w, C)
 
         rated_codewords, channel_uses = self._rated_codeword(restored_decoder_out)
-        return rated_codewords, {'conditional_tokens': conditional_tokens,
+        return rated_codewords, {'conditional_tokens': int_tokens,
                                  'prev_tokens': prev_tokens,
                                  'channel_uses': channel_uses,
                                  'next_ref_feat': int_y.detach()}
@@ -210,7 +212,6 @@ class VCTEncoderBandwidth(nn.Module):
         return rated_codewords.contiguous(), batched_channel_uses
 
     def _predicted_codeword(self, rated_codewords, q_pred_scaled):
-        # B = q_pred_scaled.size(0)
         n_patches_h, n_patches_w = rated_codewords.size(1), rated_codewords.size(2)
         ch_uses_per_token = n_patches_h * n_patches_w * self.c_out // 2
 
@@ -222,7 +223,7 @@ class VCTEncoderBandwidth(nn.Module):
     def forward(self, frame, encoder_ref, predictor, stage):
         rated_codewords, code_aux = self._coding_train(frame, encoder_ref)
         encoder_ref = [encoder_ref[(i + 1) % len(encoder_ref)]
-                        for i, _ in enumerate(encoder_ref)]
+                       for i, _ in enumerate(encoder_ref)]
         encoder_ref[-1] = code_aux['next_ref_feat']
         match stage:
             case 'coding':
@@ -231,6 +232,22 @@ class VCTEncoderBandwidth(nn.Module):
                 q_pred, _ = predictor(code_aux['conditional_tokens'], code_aux['prev_tokens'])
                 return rated_codewords.contiguous(), encoder_ref, {'q_pred': q_pred,
                                                                    'channel_uses': code_aux['channel_uses']}
+                # if self.use_entropy:
+                #     H_out, W_out = (self.feat_dims[1] + sum(self.trg_h_pad)), (self.feat_dims[2] + sum(self.trg_w_pad))
+                #     y_feat = code_aux['conditional_tokens'].view(-1, self.n_patches_h, self.n_patches_w, self.c_win, self.c_win, self.c_out)
+                #     y_feat = restore_shape(y_feat, (H_out, W_out), self.c_win)
+                #     y_feat = torch.split(y_feat, [self.feat_dims[1], H_out - self.feat_dims[1]], dim=2)[0]
+                #     y_feat = torch.split(y_feat, [self.feat_dims[2], W_out - self.feat_dims[2]], dim=3)[0]
+
+                #     pred_aux = predictor(y_feat)
+                #     # y_feat_hat = pred_aux['x_hat']
+                #     likelihoods = pred_aux['likelihoods']['y']
+                #     return rated_codewords.contiguous(), encoder_ref, {'likelihoods': likelihoods,
+                #                                                        'channel_uses': code_aux['channel_uses']}
+                # else:
+                #     q_pred, _ = predictor(code_aux['conditional_tokens'], code_aux['prev_tokens'])
+                #     return rated_codewords.contiguous(), encoder_ref, {'q_pred': q_pred,
+                #                                                        'channel_uses': code_aux['channel_uses']}
             case 'fine_tune':
                 q_pred, q_pred_scaled = predictor(code_aux['conditional_tokens'], code_aux['prev_tokens'])
                 rated_codewords, batched_channel_uses, rate_indices = self._predicted_codeword(rated_codewords, q_pred_scaled)
@@ -265,8 +282,6 @@ class VCTDecoderBandwidth(nn.Module):
 
         c_out = feat_dims[0]
         self.c_out = c_out
-        # self.feature_decoder = FeatureDecoderSimple(c_out, c_feat, c_in, reduced)
-        # self.auto_feature_encoder = FeatureEncoderSimple(c_in, c_feat, c_out, reduced)
         # self.feature_decoder = FeatureDecoder(c_out, c_feat, c_in, reduced)
         # self.auto_feature_encoder = FeatureEncoder(c_in, c_feat, c_out, reduced)
         self.feature_decoder = FeatureDecoderELIC(c_out, c_feat, c_in, reduced)
@@ -334,27 +349,12 @@ class VCTDecoderBandwidth(nn.Module):
         int_tokens = codes.view(B, n_patches_h, n_patches_w, self.c_win**2, self.c_out)
         # (B, n_patches_h, n_patches_w, c_win*c_win, C)
 
-        # padding_tokens = torch.zeros_like(int_tokens[:1])
-        # padding_tokens = list(torch.chunk(padding_tokens, chunks=self.c_win**2, dim=3))
-
         rate_indices = torch.tile(torch.arange(self.c_win**2, device=codes.device).view(1, -1), (B, 1))
         rate_mask = torch.ge(rate_indices, batch_rate_uses)
         rate_mask = torch.repeat_interleave(rate_mask.view(B, 1, 1, -1, 1), n_patches_h, dim=1)
         rate_mask = torch.repeat_interleave(rate_mask, n_patches_w, dim=2)
 
         processed_codewords = int_tokens.masked_fill_(rate_mask, 0)
-
-        # int_tokens = torch.chunk(int_tokens, chunks=B, dim=0)
-        # rate_uses = torch.chunk(batch_rate_uses, chunks=B, dim=0)
-
-        # processed_codewords = []
-        # for (tokens, rate) in zip(int_tokens, rate_uses):
-        #     rate = int(rate.view(-1).item())
-        #     code = torch.split(tokens, [rate, self.c_win**2-rate], dim=3)[0]
-        #     padding = padding_tokens[:(self.c_win**2-rate)]
-        #     codeword = torch.cat((code, *padding), dim=3)
-        #     processed_codewords.append(codeword)
-        # processed_codewords = torch.cat(processed_codewords, dim=0)
         return processed_codewords.contiguous()
 
     def _get_next_ref(self, frame_at_rate, y_feat_at_rate):
@@ -396,10 +396,12 @@ class VCTDecoderBandwidth(nn.Module):
 
 class VCTPredictor(nn.Module):
     def __init__(self, loss, feat_dims, c_win, p_win,
-                 tf_layers, tf_heads, tf_ff, tf_dropout=0.):
+                 tf_layers, tf_heads, tf_ff, tf_dropout=0.,
+                 use_entropy=False):
         super().__init__()
         self.loss = loss
         self.c_win = c_win
+        self.use_entropy = use_entropy
 
         c_out = feat_dims[0]
         self.c_out = c_out
@@ -409,8 +411,12 @@ class VCTPredictor(nn.Module):
         self.n_patches_h = (feat_dims[1] + sum(self.trg_h_pad)) // c_win
         self.n_patches_w = (feat_dims[2] + sum(self.trg_w_pad)) // c_win
         self.ch_uses_per_token = self.n_patches_h * self.n_patches_w * c_out // 2
+
         vals_per_token = self.n_patches_h * self.n_patches_w * c_out
-        self.n_rates = self.c_win ** 2
+        if use_entropy:
+            output_dim = vals_per_token * 2
+        else:
+            output_dim = 1
 
         tf_encoder_layer = nn.TransformerEncoderLayer(c_out, tf_heads, tf_ff, tf_dropout, batch_first=True)
         self.tf_encoder_sep = nn.TransformerEncoder(tf_encoder_layer, num_layers=tf_layers[0])
@@ -428,7 +434,7 @@ class VCTPredictor(nn.Module):
             nn.LeakyReLU(),
             nn.Linear(vals_per_token, vals_per_token),
             nn.LeakyReLU(),
-            nn.Linear(vals_per_token, 1),
+            nn.Linear(vals_per_token, output_dim),
         )
 
     def _scale_for_metric(self, q_pred):
@@ -436,9 +442,29 @@ class VCTPredictor(nn.Module):
             case 'l2':
                 return q_pred, 10 * torch.log10(1. / q_pred)
             case 'msssim':
-                return q_pred.clamp(0, 1), q_pred.clamp(0, 1)
+                return torch.sigmoid(q_pred), torch.sigmoid(q_pred)
             case _:
                 raise ValueError
+
+    def _scale_for_bandwidth(self, likelihoods):
+        return likelihoods, -torch.log2(likelihoods + 1e-6).sum(-1)
+
+    def _likelihood(self, batched_tokens, mean, std):
+        if self.training:
+            tokens_tilde = batched_tokens + torch.rand_like(batched_tokens) - 0.5
+        else:
+            tokens_tilde = batched_tokens.round()
+
+        # distribution = Normal(mean, std)
+        # upper = distribution.cdf(tokens_tilde + 0.5)
+        # lower = distribution.cdf(tokens_tilde - 0.5)
+        # likelihood = upper - lower
+
+        upper = torch.erf((tokens_tilde + 0.5 - mean) / (std * np.sqrt(2)))
+        lower = torch.erf((tokens_tilde - 0.5 - mean) / (std * np.sqrt(2)))
+        likelihood = 0.5 * (upper - lower)
+
+        return likelihood
 
     def forward(self, int_tokens, prev_tokens):
         B = int_tokens.size(0) // (self.n_patches_h * self.n_patches_w)
@@ -457,12 +483,18 @@ class VCTPredictor(nn.Module):
         trg_mask = get_mask(self.c_win**2, self.c_win**2).to(int_tokens.device)
         tf_decoder_out = self.tf_decoder(int_tokens, tf_encoder_out, tgt_mask=trg_mask)
         restored_decoder_out = tf_decoder_out.view(B, self.n_patches_h, self.n_patches_w, self.c_win*self.c_win, self.c_out)
-        batched_tokens = restored_decoder_out.permute(0, 3, 1, 2, 4).contiguous()
+        batched_tokens = restored_decoder_out.permute(0, 3, 1, 2, 4).contiguous().view(B, (self.c_win**2), -1)
         # (B, c_win*c_win, n_patches_h, n_patches_w, C)
 
-        predictor_out = self.quality_predictor(
-            batched_tokens.view(B, (self.c_win**2), -1)
-        ).view(B, self.c_win**2)
-        prediction = torch.cumsum(predictor_out.pow(2), dim=1)
-        prediction = torch.fliplr(prediction)
-        return self._scale_for_metric(prediction)
+        predictor_out = self.quality_predictor(batched_tokens)
+
+        if self.use_entropy:
+            mean, std = torch.chunk(predictor_out, 2, dim=2)
+            std = torch.sqrt(std.pow(2))
+            likelihoods = self._likelihood(batched_tokens, mean, std)
+            return self._scale_for_bandwidth(likelihoods)
+        else:
+            prediction = predictor_out.view(B, self.c_win**2)
+            prediction = torch.cumsum(predictor_out.pow(2), dim=1)
+            prediction = torch.fliplr(prediction)
+            return self._scale_for_metric(prediction)
