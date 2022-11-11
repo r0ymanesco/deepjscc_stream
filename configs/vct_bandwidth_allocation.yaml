@@ -1,7 +1,8 @@
 loss: 'l2'
 train_epochs: 600
 save_dir: 'checkpoints/vct_bw_allocation'
-coding_stage: 20
+init_stage: 20
+coding_stage: 40
 predictor_stage: 400
 
 dataset:

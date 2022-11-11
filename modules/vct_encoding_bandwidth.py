@@ -222,10 +222,13 @@ class VCTEncoderBandwidth(nn.Module):
 
     def forward(self, frame, encoder_ref, predictor, stage):
         rated_codewords, code_aux = self._coding_train(frame, encoder_ref)
-        encoder_ref = [encoder_ref[(i + 1) % len(encoder_ref)]
-                       for i, _ in enumerate(encoder_ref)]
-        encoder_ref[-1] = code_aux['next_ref_feat']
+        if stage != 'init':
+            encoder_ref = [encoder_ref[(i + 1) % len(encoder_ref)]
+                           for i, _ in enumerate(encoder_ref)]
+            encoder_ref[-1] = code_aux['next_ref_feat']
         match stage:
+            case 'init':
+                return rated_codewords.contiguous(), encoder_ref, {'channel_uses': code_aux['channel_uses']}
             case 'coding':
                 return rated_codewords.contiguous(), encoder_ref, {'channel_uses': code_aux['channel_uses']}
             case 'prediction':
@@ -369,24 +372,28 @@ class VCTDecoderBandwidth(nn.Module):
         processed_codewords = self._process_codeword(codes, batch_channel_uses)
         frames, coding_aux = self._coding_train(processed_codewords, decoder_ref)
 
-        decoder_ref = [decoder_ref[(i + 1) % len(decoder_ref)]
-                        for i, _ in enumerate(decoder_ref)]
+        if stage != 'init':
+            decoder_ref = [decoder_ref[(i + 1) % len(decoder_ref)]
+                           for i, _ in enumerate(decoder_ref)]
         match stage:
+            case 'init':
+                frame_at_rate = torch.chunk(frames, chunks=self.c_win**2, dim=0)
+                return frame_at_rate, decoder_ref, {}
             case 'coding':
                 frame_at_rate = torch.chunk(frames, chunks=self.c_win**2, dim=0)
                 y_feat_at_rate = torch.chunk(coding_aux['tf_decoder_out'], chunks=self.c_win**2, dim=0)
-                next_ref_frame, next_ref_feat = self._get_next_ref(frame_at_rate, y_feat_at_rate)
+                _, next_ref_feat = self._get_next_ref(frame_at_rate, y_feat_at_rate)
                 decoder_ref[-1] = next_ref_feat
-                return frame_at_rate, decoder_ref, {'next_ref_frame': next_ref_frame}
+                return frame_at_rate, decoder_ref, {}
             case 'prediction':
                 frame_at_rate = torch.chunk(frames, chunks=self.c_win**2, dim=0)
                 y_feat_at_rate = torch.chunk(coding_aux['tf_decoder_out'], chunks=self.c_win**2, dim=0)
-                next_ref_frame, next_ref_feat = self._get_next_ref(frame_at_rate, y_feat_at_rate)
+                _, next_ref_feat = self._get_next_ref(frame_at_rate, y_feat_at_rate)
                 decoder_ref[-1] = next_ref_feat
-                return frame_at_rate, decoder_ref, {'next_ref_frame': next_ref_frame}
+                return frame_at_rate, decoder_ref, {}
             case 'fine_tune':
                 decoder_ref[-1] = coding_aux['tf_decoder_out']
-                return [frames], decoder_ref, {'next_ref_frame': frames.detach()}
+                return [frames], decoder_ref, {}
             case _:
                 raise ValueError
 

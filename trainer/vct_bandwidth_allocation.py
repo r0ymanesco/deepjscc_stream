@@ -32,6 +32,7 @@ class VCTBandwidthAllocation(BaseTrainer):
         self.params = params
         self.save_dir = params.save_dir
 
+        self.init_stage = params.init_stage
         self.coding_stage = params.coding_stage
         self.predictor_stage = params.predictor_stage
 
@@ -259,6 +260,35 @@ class VCTBandwidthAllocation(BaseTrainer):
     def _get_return_aux(self, epoch_trackers):
         return_aux = {}
         match self.stage:
+            case 'init':
+                loss_mean = np.nanmean(epoch_trackers['loss_hist'])
+
+                if not self._training:
+                    psnr_mean = np.nanmean(epoch_trackers['psnr_hist'])
+                    psnr_std = np.sqrt(np.var(epoch_trackers['psnr_hist']))
+
+                    msssim_mean = np.nanmean(epoch_trackers['msssim_hist'])
+                    msssim_std = np.sqrt(np.var(epoch_trackers['msssim_hist']))
+
+                    top_rate_psnr_mean = np.nanmean(epoch_trackers['top_rate_psnr_hist'])
+                    top_rate_msssim_mean = np.nanmean(epoch_trackers['top_rate_msssim_hist'])
+
+                    if self._validate:
+                        return_aux = {
+                            'psnr_mean': psnr_mean,
+                            'top_r_psnr_mean': top_rate_psnr_mean,
+                            'msssim_mean': msssim_mean,
+                            'top_r_msssim_mean': top_rate_msssim_mean,
+                        }
+                        # self._update_loss_modulator(rate_loss_mean.unsqueeze(0))
+
+                    elif self._evaluate:
+                        return_aux = {
+                            'psnr_mean': psnr_mean,
+                            'psnr_std': psnr_std,
+                            'msssim_mean': msssim_mean,
+                            'msssim_std': msssim_std,
+                        }
             case 'coding':
                 loss_mean = np.nanmean(epoch_trackers['loss_hist'])
                 rate_loss_mean = torch.stack(epoch_trackers['rate_loss_hist'], dim=0).mean(0).detach()
@@ -326,6 +356,24 @@ class VCTBandwidthAllocation(BaseTrainer):
 
     def _update_epoch_postfix(self, batch_trackers, epoch_trackers, epoch_postfix):
         match self.stage:
+            case 'init':
+                epoch_trackers['loss_hist'].append(np.nanmean(batch_trackers['batch_loss']))
+                epoch_trackers['rate_loss_hist'].append(torch.cat(batch_trackers['batch_rate_loss'], dim=0).mean(0).detach())
+                epoch_trackers['top_rate_loss_hist'].append(np.nanmean(batch_trackers['top_rate_loss']))
+                epoch_postfix[f'{self.loss} loss/top_r'] = '{:.5f}/{:.5f}'.format(epoch_trackers['loss_hist'][-1],
+                                                                                  epoch_trackers['top_rate_loss_hist'][-1])
+                if not self._training:
+                    epoch_trackers['psnr_hist'].extend(batch_trackers['batch_psnr'])
+                    batch_psnr_mean = np.nanmean(batch_trackers['batch_psnr'])
+                    epoch_trackers['top_rate_psnr_hist'].extend(batch_trackers['top_rate_psnr'])
+                    top_rate_psnr_mean = np.nanmean(batch_trackers['top_rate_psnr'])
+                    epoch_postfix['psnr/top_r'] = '{:.5f}/{:.5f}'.format(batch_psnr_mean, top_rate_psnr_mean)
+
+                    epoch_trackers['msssim_hist'].extend(batch_trackers['batch_msssim'])
+                    batch_msssim_mean = np.nanmean(batch_trackers['batch_msssim'])
+                    epoch_trackers['top_rate_msssim_hist'].extend(batch_trackers['top_rate_msssim'])
+                    top_rate_msssim_mean = np.nanmean(batch_trackers['top_rate_msssim'])
+                    epoch_postfix['msssim/top_r'] = '{:.5f}/{:.5f}'.format(batch_msssim_mean, top_rate_msssim_mean)
             case 'coding':
                 epoch_trackers['loss_hist'].append(np.nanmean(batch_trackers['batch_loss']))
                 epoch_trackers['rate_loss_hist'].append(torch.cat(batch_trackers['batch_rate_loss'], dim=0).mean(0).detach())
@@ -372,6 +420,28 @@ class VCTBandwidthAllocation(BaseTrainer):
         target = torch.stack([target_frame]*len(frame_at_rate), dim=1)
 
         match self.stage:
+            case 'init':
+                rate_dist_loss, _ = calc_loss(predictions, target, self.loss, 'batch')
+                dist_loss_mean = torch.mean(rate_dist_loss)
+
+                batch_trackers['batch_loss'].append(dist_loss_mean.item())
+                batch_trackers['batch_rate_loss'].append(rate_dist_loss.clone().detach())
+                batch_trackers['top_rate_loss'].append(rate_dist_loss[:, -1].mean().item())
+
+                predicted_frames = frame_at_rate
+                target_frames = [target_frame] * len(frame_at_rate)
+
+                loss = (rate_dist_loss * self.loss_weights).mean()
+
+                if not self._training:
+                    frame_psnr = calc_psnr(predicted_frames, target_frames)
+                    batch_trackers['batch_psnr'].extend(frame_psnr)
+                    batch_trackers['top_rate_psnr'].extend(calc_psnr([frame_at_rate[-1]], [target_frame]))
+                    # NOTE the top rate val is still affected by chosen ref frame
+
+                    frame_msssim = calc_msssim(predicted_frames, target_frames)
+                    batch_trackers['batch_msssim'].extend(frame_msssim)
+                    batch_trackers['top_rate_msssim'].extend(calc_msssim([frame_at_rate[-1]], [target_frame]))
             case 'coding':
                 rate_dist_loss, _ = calc_loss(predictions, target, self.loss, 'batch')
                 dist_loss_mean = torch.mean(rate_dist_loss)
@@ -521,7 +591,14 @@ class VCTBandwidthAllocation(BaseTrainer):
         self._set_stage()
 
     def _set_stage(self):
-        if self.epoch <= self.coding_stage:
+        if self.epoch <= self.init_stage:
+            self.stage = 'init'
+            self.optimizer = self.coding_optimizer
+            self.lr_scheduler = self.coding_scheduler
+
+            self.predictor.eval()
+            self.predictor.requires_grad_(False)
+        elif self.epoch <= self.coding_stage:
             self.stage = 'coding'
             self.optimizer = self.coding_optimizer
             self.lr_scheduler = self.coding_scheduler
@@ -611,6 +688,7 @@ class VCTBandwidthAllocation(BaseTrainer):
     @staticmethod
     def get_parser(parser):
         parser.add_argument('--save_dir', type=str, help='directory to save checkpoints')
+        parser.add_argument('--init_stage', type=int, help='init stage training epochs')
         parser.add_argument('--coding_stage', type=int, help='feature stage training epochs')
         parser.add_argument('--predictor_stage', type=int, help='predictor stage training epochs')
 
