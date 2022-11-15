@@ -55,7 +55,6 @@ def get_trainer(shell_params):
 
 
 if __name__ == '__main__':
-    # os.environ["CUDA_VISIBLE_DEVICES"] = "1"
     torch.backends.cudnn.benchmark = True
     writer = None
 
