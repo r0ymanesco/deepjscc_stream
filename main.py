@@ -95,7 +95,7 @@ if __name__ == '__main__':
             print('Training complete'); break
 
     print('Evaluating...')
-    # TODO separate this from main
+    # TODO separate eval loop from main
     for snr in test_snrs:
         trainer.evaluate()
         _, _, eval_aux = trainer(snr)

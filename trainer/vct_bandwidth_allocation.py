@@ -156,6 +156,7 @@ class VCTBandwidthAllocation(BaseTrainer):
             use_entropy=params.use_entropy
         ).to(self.device)
         self.job_name += '_' + str(encoder)
+        # self.job_name += '_' + str(encoder) + '_' + str(decoder)
         return encoder, decoder, predictor
 
     def _get_modem(self, params):
@@ -280,7 +281,6 @@ class VCTBandwidthAllocation(BaseTrainer):
                             'msssim_mean': msssim_mean,
                             'top_r_msssim_mean': top_rate_msssim_mean,
                         }
-                        # self._update_loss_modulator(rate_loss_mean.unsqueeze(0))
 
                     elif self._evaluate:
                         return_aux = {
@@ -310,7 +310,7 @@ class VCTBandwidthAllocation(BaseTrainer):
                             'msssim_mean': msssim_mean,
                             'top_r_msssim_mean': top_rate_msssim_mean,
                         }
-                        # self._update_loss_modulator(rate_loss_mean.unsqueeze(0))
+                        self._update_loss_modulator(rate_loss_mean.unsqueeze(0))
 
                     elif self._evaluate:
                         return_aux = {
@@ -518,7 +518,7 @@ class VCTBandwidthAllocation(BaseTrainer):
 
                 mod_mask = torch.gt(forward_diff, rate_loss_mean * 0.2)
                 mod_gain = (2 * mod_mask.to(torch.float) - 1) * self.loss_modulator_lmda
-                self.loss_weights += mod_gain
+                self.loss_weights = (self.loss_weights * 10) + mod_gain
 
                 # NOTE Depends on change in loss between top rate and lower rates
                 # lower_rates = torch.index_select(rate_loss_mean, 1, rates[:-1])
@@ -533,7 +533,7 @@ class VCTBandwidthAllocation(BaseTrainer):
                 # self.rate_loss_old = rate_loss_mean.clone().detach()
             case _:
                 raise NotImplementedError
-        self.loss_weights = torch.clamp(self.loss_weights, 1, 10).detach()
+        self.loss_weights = torch.clamp(self.loss_weights, 1, 10).detach() / 10.
         print(self.loss_weights)
 
     def _update_es(self, loss):
@@ -543,11 +543,26 @@ class VCTBandwidthAllocation(BaseTrainer):
         flag, best_loss, best_epoch, bad_epochs = self.es.step(torch.Tensor([loss]), self.epoch)
         if flag:
             match self.stage:
+                case 'init':
+                    flag = False
+                    self.load_weights()
+
+                    self.init_stage = self.epoch
+                    self.stage = 'coding'
+                    self.es.reset()
                 case 'coding':
                     flag = False
                     self.load_weights()
 
+                    self.coding_stage = self.epoch
                     self.stage = 'prediction'
+                    self.es.reset()
+                case 'prediction':
+                    flag = False
+                    self.load_weights()
+
+                    self.predictor_stage = self.epoch
+                    self.stage = 'fine_tune'
                     self.es.reset()
                 case _:
                     print('ES criterion met; loading best weights from epoch {}'.format(best_epoch))
@@ -684,6 +699,7 @@ class VCTBandwidthAllocation(BaseTrainer):
     def load_state_dict(self, state_dict):
         self.loss_weights = state_dict['loss_weights'].to(self.device)
         self.rate_loss_old = state_dict['rate_loss_old'].to(self.device)
+        # self.loss_weights = torch.clamp(self.loss_weights, 1, 10).detach() / 10.
 
     @staticmethod
     def get_parser(parser):
