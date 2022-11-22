@@ -206,18 +206,10 @@ class VCTBandwidthAllocation(BaseTrainer):
                 n_frames = frames.size(1) // 3
                 frames = list(torch.chunk(frames.to(self.device), chunks=n_frames, dim=1))
 
-                # frames = [torch.zeros_like(frames[0])] * self.n_conditional_frames + frames
-                # gop_struct, gop_len = self._get_gop_struct(n_frames+self.n_conditional_frames)
-
                 B = frames[0].size(0)
                 encoder_ref = [torch.zeros((B, *self.feat_dims)).to(self.device)] * self.n_conditional_frames
                 decoder_ref = [torch.zeros((B, *self.feat_dims)).to(self.device)] * self.n_conditional_frames
                 for target_frame in frames:
-                # for (f_start, f_end) in zip(gop_struct[:-gop_len], gop_struct[gop_len:]):
-                    # gop = frames[f_start:f_end]
-                    # encoder_ref = gop[:2]
-                    # target_frame = gop[-1]
-
                     code, encoder_ref, encoder_aux = self.encoder(target_frame, encoder_ref,
                                                                   self.predictor, self.stage)
 
@@ -699,7 +691,6 @@ class VCTBandwidthAllocation(BaseTrainer):
     def load_state_dict(self, state_dict):
         self.loss_weights = state_dict['loss_weights'].to(self.device)
         self.rate_loss_old = state_dict['rate_loss_old'].to(self.device)
-        # self.loss_weights = torch.clamp(self.loss_weights, 1, 10).detach() / 10.
 
     @staticmethod
     def get_parser(parser):
