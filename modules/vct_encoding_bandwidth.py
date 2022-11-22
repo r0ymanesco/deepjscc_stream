@@ -503,5 +503,5 @@ class VCTPredictor(nn.Module):
         else:
             prediction = predictor_out.view(B, self.c_win**2)
             prediction = torch.cumsum(predictor_out.pow(2), dim=1)
-            prediction = torch.fliplr(prediction)
+            prediction = torch.fliplr(prediction.squeeze(-1))
             return self._scale_for_metric(prediction)
