@@ -1,17 +1,22 @@
 * Causal DeepJSCC coding for video streaming
 The objective of this repo is to create a causal JSCC scheme for video streaming.
 The following ideas will be implemented:
-** [ ] Use a transformer model to perform autoregressive coding
+** [X] Use a transformer model to perform autoregressive coding
 ** [ ] Consider longer skip connections
-** [ ] Use an entropy model to estimate the information content of the codeword and determine where key frames should be initialized
+** [-] Use an entropy model to estimate the information content of the codeword and determine where key frames should be initialized
+** [X] Use a predictor model to estimate the distortion of the codeword and determine how many channel uses for the frame
 ** [ ] Use a quantisation method to learn a discrete latent space. This will allow us to use the IEEE 802.15.4 standard.
 ** [ ] Alternatively, consider integrating the full OFDM pipeline, including:
-*** Pilots + equaliser
-*** 3GPP channel models
-*** PAPR constraint
+- Pilots + equaliser
+- 3GPP channel models
+- PAPR constraint
 
-* Notes
-** Training strategy:
-*** Train (E, D) for all possible gop sizes to obtain best distortion for each size
-*** Train density model to obtain conditional entropy
-*** Use density model to navigate R-D trade off
+* Trainers
+The VCTBandwidthAllocation trainer implements the most up-to-date version of this work.
+This code base also holds trainers from prior works, including:
+- DeepWiVe
+- DeepJSCC-Q
+- DeepJSCEC
+
+* Requirements
+Check requirements.yaml for required packages.

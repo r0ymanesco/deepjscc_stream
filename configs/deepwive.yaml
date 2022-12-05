@@ -1,0 +1,45 @@
+loss: 'l2'
+train_epochs: 600
+save_dir: 'checkpoints/deepwive'
+key_stage: 20
+interp_stage: 400
+bw_stage: 600
+
+dataset:
+  dataset: 'ucf101'
+  path: '/home/tt2114/datasets/UCF101'
+  frames_per_clip: 25
+  train_batch_size: 6
+  eval_batch_size: 6
+
+optimizer:
+  solver: 'adam'
+  lr: 0.0001
+
+scheduler:
+  scheduler: 'mult_lr'
+  lr_schedule_factor: 0.8
+
+encoder:
+  c_in: 3
+  c_feat: 256
+  c_out: 240
+  ss_sigma: 0.01
+  ss_levels: 5
+  gop_size: 4
+  n_bw_chunks: 20
+  policy_batch_size: 8
+  max_memory_size: 300
+
+modem:
+  modem: 'continuous'
+
+channel:
+  model: 'awgn'
+  train_snr: [0.0, 20.0]
+  eval_snr: [0.0, 20.0]
+
+early_stop:
+  mode: 'min'
+  delta: 0.0
+  patience: 8

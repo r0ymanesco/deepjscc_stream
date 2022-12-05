@@ -1,5 +1,7 @@
 import ipdb
 import numpy as np
+from collections import Counter
+from itertools import combinations
 
 import torch
 import torch.optim as optim
@@ -131,3 +133,30 @@ def calc_loss(prediction, target, loss, reduction='mean'):
         case _:
             raise NotImplementedError
     return loss, loss_aux
+
+
+def perms_without_reps(s):
+    partitions = list(Counter(s).items())
+
+    def _helper(idxset, i):
+        if len(idxset) == 0:
+            yield ()
+            return
+        for pos in combinations(idxset, partitions[i][1]):
+            for res in _helper(idxset - set(pos), i+1):
+                yield (pos,) + res
+
+    n = len(s)
+    for poses in _helper(set(range(n)), 0):
+        out = [None] * n
+        for i, pos in enumerate(poses):
+            for idx in pos:
+                out[idx] = partitions[i][0]
+        yield out
+
+
+def split_list_by_val(x, s):
+    size = len(x)
+    idx_list = [idx + 1 for idx, val in enumerate(x) if val == s]
+    res = [x[i:j] for i, j in zip([0] + idx_list, idx_list + [size])]
+    return res

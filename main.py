@@ -48,6 +48,11 @@ def get_trainer(shell_params):
             parser = VCTBandwidthAllocation.get_parser(parser)
             params = parser.parse_args()
             trainer = VCTBandwidthAllocation(params.dataset.dataset, params.loss, params, params.resume)
+        case 'deepwive':
+            from trainer.deepwive import DeepWiVe
+            parser = DeepWiVe.get_parser(parser)
+            params = parser.parse_args()
+            trainer = DeepWiVe(params.dataset.dataset, params.loss, params, params.resume)
         case _:
             raise NotImplementedError
 
