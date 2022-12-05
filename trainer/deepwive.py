@@ -276,7 +276,7 @@ class DeepWiVe(BaseTrainer):
                             epoch_postfix['snr'] = '{:.2f}'.format(batch_snr.item())
 
                             gop = frames[i_start-1:i_end]
-                            gop_predictions = [torch.zeros(1)] * len(gop)
+                            gop_predictions = [torch.zeros(1) for _ in range(len(gop))]
 
                             if gop_idx == 0:
                                 # NOTE init frame uses full bw
@@ -318,8 +318,8 @@ class DeepWiVe(BaseTrainer):
                             loss = 0
                             gop = frames[i_start-1:i_end]
                             gop_predictions = [[] for _ in range(len(gop))]
-                            emulated_predictions = [torch.zeros(1)] * len(gop)
-                            state_inputs = [torch.zeros(1)] * len(gop)
+                            emulated_predictions = [torch.zeros(1) for _ in range(len(gop))]
+                            state_inputs = [torch.zeros(1) for _ in range(len(gop))]
 
                             if gop_idx == 0:
                                 init_frame = frames[0]
