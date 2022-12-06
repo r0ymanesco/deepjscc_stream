@@ -574,6 +574,7 @@ class DeepWiVe(BaseTrainer):
                 self.channel.requires_grad_(True)
 
                 self.loader = self.train_loader
+                self._set_stage()
             case 'val':
                 torch.set_grad_enabled(False)
                 self.key_encoder.eval()
@@ -601,6 +602,7 @@ class DeepWiVe(BaseTrainer):
                 self.channel.requires_grad_(False)
 
                 self.loader = self.val_loader
+                self._set_stage()
             case 'eval':
                 torch.set_grad_enabled(False)
                 self.key_encoder.eval()
@@ -628,8 +630,7 @@ class DeepWiVe(BaseTrainer):
                 self.channel.requires_grad_(False)
 
                 self.loader = self.eval_loader
-
-        self._set_stage()
+                self.stage = 'bw'
 
     def _set_stage(self):
         if self.epoch <= self.key_stage:
