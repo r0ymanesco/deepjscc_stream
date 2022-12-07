@@ -325,7 +325,7 @@ class DeepWiVe(BaseTrainer):
                             first_key = predictions[i_start-1]
                             gop_predictions[0] = torch.chunk(first_key, chunks=first_key.size(0), dim=0)
 
-                            # Channel emulation assuming full bw
+                            # NOTE Channel emulation assuming full bw
                             emulated_predictions[0] = first_key
                             state_inputs[0] = first_key
                             last_key = gop[-1]
@@ -347,7 +347,9 @@ class DeepWiVe(BaseTrainer):
                             frame_state = torch.cat(state_inputs, dim=1)
                             allocation, action_aux = self.bw_allocator.get_action((frame_state, batch_snr), self.mode)
                             epoch_postfix['eps'] = action_aux['eps_threshold']
+
                             # FIXME these for loops are bad for performance
+                            # Can improve by batching at cost of memory
                             for b_idx, b_alloc in enumerate(allocation):
                                 b_gop_predictions = [torch.zeros(1)] * len(gop)
                                 b_gop_predictions[0] = gop_predictions[0][b_idx]
@@ -356,6 +358,7 @@ class DeepWiVe(BaseTrainer):
                                                                         int(b_alloc[0].item()*self.chunk_size))
                                 b_gop_predictions[-1] = last_key_prediction
                                 gop_predictions[-1].append(last_key_prediction)
+
                                 for (pred_idx, t) in zip(interp_struct, interp_dist):
                                     target_frame = gop[pred_idx][b_idx].unsqueeze(0)
                                     ref = (b_gop_predictions[pred_idx-t], b_gop_predictions[pred_idx+t])
@@ -376,6 +379,7 @@ class DeepWiVe(BaseTrainer):
                             if gop_idx > 0:
                                 experience['next_state'] = (frame_state.clone(), batch_snr.clone())
                                 self.bw_allocator.push_experience(experience)
+                                experience = {}
 
                             experience['state'] = (frame_state.clone(), batch_snr.clone())
                             experience['action'] = action_aux['policy'].clone()
@@ -495,16 +499,17 @@ class DeepWiVe(BaseTrainer):
                 batch_trackers['buffer_ready'] = flag
                 if flag: batch_trackers['batch_loss'].append(loss.item())
 
+                batch_trackers['reward'] = self._get_reward(predicted_frames, target_frames)
+
                 dist_loss, _ = calc_loss(predictions, target, self.loss)
                 batch_trackers['batch_dist_loss'].append(dist_loss.item())
 
-                frame_psnr = calc_psnr(predicted_frames, target_frames)
-                batch_trackers['batch_psnr'].extend(frame_psnr)
+                if not self._training:
+                    frame_psnr = calc_psnr(predicted_frames, target_frames)
+                    batch_trackers['batch_psnr'].extend(frame_psnr)
 
-                frame_msssim = calc_msssim(predicted_frames, target_frames)
-                batch_trackers['batch_msssim'].extend(frame_msssim)
-
-                batch_trackers['reward'] = self._get_reward(predicted_frames, target_frames)
+                    frame_msssim = calc_msssim(predicted_frames, target_frames)
+                    batch_trackers['batch_msssim'].extend(frame_msssim)
             case _:
                 raise ValueError
         return loss, batch_trackers

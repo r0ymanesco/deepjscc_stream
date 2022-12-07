@@ -201,8 +201,7 @@ class BWAllocator(nn.Module):
         action_set = [[sum(bw) for bw in action] for action in action_set]
         assert len(action_set) == self.num_actions
         print('Action set size: {}'.format(len(action_set)))
-        action_set = torch.tensor(action_set)
-        return action_set
+        return torch.tensor(action_set)
 
     def push_experience(self, experience):
         self.memory.push(
@@ -247,7 +246,6 @@ class BWAllocator(nn.Module):
             rewards = rewards.to(self.device)
             next_states = next_states.to(self.device)
             next_snr = next_snr.to(self.device)
-
 
             actor_Q = self.actor(states, snr).gather(1, actions.unsqueeze(1))
             next_action_Q = self.actor(next_states, next_snr).max(1)[0]
