@@ -1,18 +1,12 @@
 import math
 import ipdb
 import random
-import functools
-import numpy as np
 from collections import deque
-from itertools import permutations
 from compressai.layers import ResidualBlock, ResidualBlockWithStride, AttentionBlock
 
 import torch
 import torch.nn as nn
 import torch.autograd
-import torch.optim as optim
-import torch.nn.functional as F
-import torch.optim.lr_scheduler as LS
 # import torch.utils.checkpoint as checkpoint
 
 from modules.attention_feature import AFModule
@@ -192,20 +186,23 @@ class BWAllocator(nn.Module):
         self.eps_decay = 400
         self.steps_done = 0
 
-        action_set = [1] * n_chunks + [0] * (gop_size - 1)
-        action_set = perms_without_reps(action_set)
-        action_set = [split_list_by_val(action, 0) for action in action_set]
-        action_set = [[sum(bw) for bw in action] for action in action_set]
-        assert len(action_set) == self.num_actions
-        print('Action set size: {}'.format(len(action_set)))
-        self.action_set = torch.tensor(action_set).to(device)
-        print(self.action_set)
+        self.action_set = self._get_action_set(n_chunks, gop_size).to(device)
 
         self.actor = ActorCell(c_in=21*(gop_size - 1)+6,
                                c_feat=actor_feat,
                                output_nc=self.num_actions)
 
         self.memory = Memory(max_memory_size)
+
+    def _get_action_set(self, n_chunks, gop_size):
+        action_set = [1] * n_chunks + [0] * (gop_size - 1)
+        action_set = perms_without_reps(action_set)
+        action_set = [split_list_by_val(action, 0) for action in action_set]
+        action_set = [[sum(bw) for bw in action] for action in action_set]
+        assert len(action_set) == self.num_actions
+        print('Action set size: {}'.format(len(action_set)))
+        action_set = torch.tensor(action_set)
+        return action_set
 
     def push_experience(self, experience):
         self.memory.push(
@@ -216,10 +213,11 @@ class BWAllocator(nn.Module):
         )
 
     def get_action(self, state, mode):
+        (state, snr) = state
+
         eps_threshold = self.eps_end + (self.eps_start - self.eps_end) * math.exp(
             -1. * self.steps_done / self.eps_decay)
 
-        (state, snr) = state
         if mode == 'train':
             self.steps_done += 1
 

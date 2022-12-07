@@ -209,10 +209,6 @@ class DeepWiVe(BaseTrainer):
         prediction = a1 * pred_1 + a2 * pred_2 + a3 * r
         return prediction
 
-    # def _bw_process(self, frame_state, batch_snr):
-    #     allocation, policy = self.bw_allocator.get_action((frame_state, batch_snr), self.mode)
-    #     return allocation, policy
-
     def _get_gop_struct(self, n_frames):
         match self.gop_size:
             case 4:
@@ -782,7 +778,3 @@ class DeepWiVe(BaseTrainer):
     def __str__(self):
         return self.job_name
 
-
-def print_len(gop_predictions):
-    for buff in gop_predictions:
-        print(len(buff))
