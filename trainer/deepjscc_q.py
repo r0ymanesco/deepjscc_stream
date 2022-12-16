@@ -38,7 +38,7 @@ class DeepJSCC_Q(BaseTrainer):
 
         self.frame_dims = dataset_aux['img_sizes']
         self.reduced_arch = dataset_aux['reduced_arch']
-        if self.reduced_arch:
+        if self.reduced_arch or self.loss == 'ssim':
             self.sim_metric = 'ssim'
         else:
             self.sim_metric = 'msssim'

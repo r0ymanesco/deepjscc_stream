@@ -64,7 +64,7 @@ class SoftHardQuantize(nn.Module):
         uniform_prob = torch.ones_like(likelihoods) / self.n_embed
         quant_loss = F.kl_div(torch.log(likelihoods.detach() + 1e-10), uniform_prob, reduction='batchmean') * self.commitment
         return quantize, {'quant_loss': quant_loss,
-                          'embed': self.embed.transpose(0, 1).clone().detach(),
+                          'embed': self.embed.clone().detach(),
                           'likelihoods': likelihoods.clone().detach(),
                           'sigma': sigma.item()}
 
@@ -105,7 +105,7 @@ class LearnedQuantize(nn.Module):
         if self.training:
             sigma = self._anneal()
         else:
-            sigma = 1e10
+            sigma = 1e10 * torch.ones(1, device=x.device)
 
         sigma = self._anneal()
 
@@ -140,6 +140,6 @@ class LearnedQuantize(nn.Module):
         uniform_prob = torch.ones_like(likelihoods) / self.n_embed
         quant_loss = F.kl_div(torch.log(likelihoods.detach() + 1e-10), uniform_prob, reduction='batchmean') * self.commitment
         return quantize, {'quant_loss': quant_loss,
-                          'embed': self.embed.transpose(0, 1).clone().detach(),
+                          'embed': self.embed.clone().detach(),
                           'likelihoods': likelihoods.clone().detach(),
                           'sigma': sigma.item()}

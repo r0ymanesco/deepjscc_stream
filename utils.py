@@ -159,6 +159,17 @@ def calc_loss(prediction, target, loss, reduction='mean'):
                                data_range=1, size_average=avg)
             if not avg:
                 loss = loss.view(-1, shape[1])
+        case 'ssim':
+            if len(shape) == 5:
+                prediction = prediction.view(-1, shape[2], shape[3], shape[4])
+                target = target.view(-1, shape[2], shape[3], shape[4])
+
+            avg = False
+            if reduction == 'mean': avg = True
+            loss = 1 - ssim(prediction, target,
+                            data_range=1, size_average=avg)
+            if not avg:
+                loss = loss.view(-1, shape[1])
         case _:
             raise NotImplementedError
     return loss, loss_aux

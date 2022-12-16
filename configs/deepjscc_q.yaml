@@ -1,11 +1,11 @@
-loss: 'l2'
+loss: 'ssim'
 train_epochs: 600
 save_dir: 'checkpoints/deepjscc_q'
 
 dataset:
-  dataset: 'imagenet'
-  path: '/home/tt2114/datasets/ImageNet'
-  crop: 128
+  dataset: 'cifar10'
+  path: '/home/tt2114/datasets/CIFAR10'
+  crop: 256
   train_batch_size: 6
   eval_batch_size: 6
 
