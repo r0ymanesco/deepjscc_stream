@@ -1,0 +1,42 @@
+loss: 'l2'
+train_epochs: 600
+save_dir: 'checkpoints/deepjscc_q'
+
+dataset:
+  dataset: 'imagenet'
+  path: '/home/tt2114/datasets/ImageNet'
+  crop: 128
+  train_batch_size: 6
+  eval_batch_size: 6
+
+optimizer:
+  solver: 'adam'
+  lr: 0.0001
+
+scheduler:
+  scheduler: 'mult_lr'
+  lr_schedule_factor: 0.8
+
+encoder:
+  c_in: 3
+  c_feat: 256
+  c_out: 256
+
+modem:
+  modem: 'lm'
+  mod_order: 64
+  commitment: 0.0
+  sigma_start: 5.0
+  sigma_max: 200.0
+  sigma_period: 1000
+  sigma_scale: 5.0
+
+channel:
+  model: 'awgn'
+  train_snr: [20.0, 20.0]
+  eval_snr: [20.0, 20.0]
+
+early_stop:
+  mode: 'min'
+  delta: 0.0
+  patience: 8

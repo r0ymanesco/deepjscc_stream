@@ -1,8 +1,5 @@
-import os
-import os.path
 import cv2
 import glob
-import ipdb
 import random
 import numpy as np
 

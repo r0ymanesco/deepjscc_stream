@@ -1,4 +1,6 @@
 import ipdb
+import pickle
+import random
 import numpy as np
 from collections import Counter
 from itertools import combinations
@@ -8,7 +10,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 import torch.optim.lr_scheduler as LS
 
-from pytorch_msssim import ms_ssim
+from pytorch_msssim import ms_ssim, ssim
 
 from modules.lookahead import Lookahead
 
@@ -25,6 +27,22 @@ def get_dataloader(dataset, params):
             train_loader = UCF101(params.path, 'train', params.frames_per_clip)
             val_loader = UCF101(params.path, 'val', params.frames_per_clip)
             eval_loader = UCF101(params.path, 'eval', params.frames_per_clip)
+        case 'imagenet':
+            from dataloaders.imagenet import ImageNet
+            img_sizes, reduced_arch = ImageNet.get_config(params.crop)
+            dataset_aux['img_sizes'] = img_sizes
+            dataset_aux['reduced_arch'] = reduced_arch
+            train_loader = ImageNet(params.path, params.path + '/256_images.csv', 'train', params.crop)
+            val_loader = ImageNet(params.path, params.path + '/256_images.csv', 'val', params.crop)
+            eval_loader = ImageNet(params.path, params.path + '/256_images.csv', 'eval', params.crop)
+        case 'cifar10':
+            from dataloaders.cifar10 import CIFAR10
+            img_sizes, reduced_arch = CIFAR10.get_config()
+            dataset_aux['img_sizes'] = img_sizes
+            dataset_aux['reduced_arch'] = reduced_arch
+            train_loader = CIFAR10(params.path, 'train')
+            val_loader = CIFAR10(params.path, 'val')
+            eval_loader = CIFAR10(params.path, 'eval')
         case _:
             raise NotImplementedError
     return (train_loader, val_loader, eval_loader), dataset_aux
@@ -89,6 +107,17 @@ def calc_psnr(predictions, targets):
         mse = torch.mean((original - prediction) ** 2., dtype=torch.float32)
         psnr = 20 * torch.log10(255. / torch.sqrt(mse))
         metric.append(psnr.item())
+    return metric
+
+
+def calc_ssim(predictions, targets):
+    metric = []
+    for (pred, targ) in zip(predictions, targets):
+        original = as_img_array(targ)
+        prediction = as_img_array(pred)
+        ssim_val = ssim(original, prediction,
+                        data_range=255, size_average=True)
+        metric.append(ssim_val.item())
     return metric
 
 
@@ -160,3 +189,17 @@ def split_list_by_val(x, s):
     idx_list = [idx + 1 for idx, val in enumerate(x) if val == s]
     res = [x[i:j] for i, j in zip([0] + idx_list, idx_list + [size])]
     return res
+
+
+def crop_cv2(img, patch):
+    assert patch > 0
+    height, width, _ = img.shape
+    start_x = random.randint(0, height - patch)
+    start_y = random.randint(0, width - patch)
+    return img[start_x:start_x + patch, start_y:start_y + patch]
+
+
+def unpickle(file):
+    with open(file, 'rb') as fo:
+        dict = pickle.load(fo, encoding='bytes')
+    return dict

@@ -53,6 +53,11 @@ def get_trainer(shell_params):
             parser = DeepWiVe.get_parser(parser)
             params = parser.parse_args()
             trainer = DeepWiVe(params.dataset.dataset, params.loss, params, params.resume)
+        case 'deepjscc_q':
+            from trainer.deepjscc_q import DeepJSCC_Q
+            parser = DeepJSCC_Q.get_parser(parser)
+            params = parser.parse_args()
+            trainer = DeepJSCC_Q(params.dataset.dataset, params.loss, params, params.resume)
         case _:
             raise NotImplementedError
 

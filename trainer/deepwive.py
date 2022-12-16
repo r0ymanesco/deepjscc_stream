@@ -398,7 +398,7 @@ class DeepWiVe(BaseTrainer):
             if self._validate: terminate = self._update_es(loss_mean)
 
             self.reset()
-            return loss_mean, terminate, return_aux
+        return loss_mean, terminate, return_aux
 
     def _get_reward(self, predicted_frames, target_frames):
         match self.loss:

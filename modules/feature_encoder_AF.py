@@ -10,12 +10,19 @@ from modules.attention_feature import AFModule
 
 
 class FeatureEncoderAF(nn.Module):
-    def __init__(self, c_in, c_feat, c_out):
+    def __init__(self, c_in, c_feat, c_out, reduced=False):
         super().__init__()
         self.c_in = c_in
         self.c_feat = c_feat
         self.c_out = c_out
+        self.reduced = reduced
 
+        if reduced:
+            self._reduced_arch(c_in, c_feat, c_out)
+        else:
+            self._regular_arch(c_in, c_feat, c_out)
+
+    def _regular_arch(self, c_in, c_feat, c_out):
         self.layers = nn.ModuleDict({
             'rbws1': ResidualBlockWithStride(
                 in_ch=c_in,
@@ -62,6 +69,55 @@ class FeatureEncoderAF(nn.Module):
             'a2': AttentionBlock(c_out),
         })
 
+    def _reduced_arch(self, c_in, c_feat, c_out):
+        self.layers = nn.ModuleDict({
+            'rbws1': ResidualBlockWithStride(
+                in_ch=c_in,
+                out_ch=c_feat,
+                stride=2),
+
+            'af1': AFModule(c_in=c_feat),
+
+            'rb1': ResidualBlock(
+                in_ch=c_feat,
+                out_ch=c_feat),
+
+            'rbws2': ResidualBlock(
+                in_ch=c_feat,
+                out_ch=c_feat),
+
+            'rb2': ResidualBlock(
+                in_ch=c_feat,
+                out_ch=c_feat),
+
+            'af2': AFModule(c_in=c_feat),
+
+            'a1': AttentionBlock(c_feat),
+
+            'rbws3': ResidualBlockWithStride(
+                in_ch=c_feat,
+                out_ch=c_feat,
+                stride=2),
+
+            'af3': AFModule(c_in=c_feat),
+
+            'rb3': ResidualBlock(
+                in_ch=c_feat,
+                out_ch=c_feat),
+
+            'rb4': ResidualBlock(
+                in_ch=c_feat,
+                out_ch=c_feat),
+
+            'rbws4': ResidualBlock(
+                in_ch=c_feat,
+                out_ch=c_out),
+
+            'af4': AFModule(c_in=c_out),
+
+            'a2': AttentionBlock(c_out),
+        })
+
     def run_fn(self, module_key):
         def custom_forward(*inputs):
             if module_key[:2] == 'af':
@@ -91,17 +147,24 @@ class FeatureEncoderAF(nn.Module):
         return x
 
     def __str__(self):
-        return f'FeatureEncoderAF({self.c_in},{self.c_feat},{self.c_out})'
+        return f'FeatureEncoderAF({self.c_in},{self.c_feat},{self.c_out},{self.reduced})'
 
 
 class FeatureDecoderAF(nn.Module):
-    def __init__(self, c_in, c_feat, c_out, feat_dims):
+    def __init__(self, c_in, c_feat, c_out, feat_dims, reduced=False):
         super().__init__()
         self.c_in = c_in
         self.c_feat = c_feat
         self.c_out = c_out
         self.feat_dims = feat_dims
+        self.reduced = reduced
 
+        if reduced:
+            self._reduced_arch(c_in, c_feat, c_out)
+        else:
+            self._regular_arch(c_in, c_feat, c_out)
+
+    def _regular_arch(self, c_in, c_feat, c_out):
         self.layers = nn.ModuleDict({
             'a1': AttentionBlock(c_in),
 
@@ -154,6 +217,55 @@ class FeatureDecoderAF(nn.Module):
             'sigmoid': nn.Sigmoid()
         })
 
+    def _reduced_arch(self, c_in, c_feat, c_out):
+        self.layers = nn.ModuleDict({
+            'a1': AttentionBlock(c_in),
+
+            'af1': AFModule(c_in=c_in),
+
+            'rb1': ResidualBlock(
+                in_ch=c_in,
+                out_ch=c_feat),
+
+            'rbu1': ResidualBlock(
+                in_ch=c_feat,
+                out_ch=c_feat),
+
+            'rb2': ResidualBlock(
+                in_ch=c_feat,
+                out_ch=c_feat),
+
+            'af2': AFModule(c_in=c_feat),
+
+            'rbu2': ResidualBlockUpsample(
+                in_ch=c_feat,
+                out_ch=c_feat,
+                upsample=2),
+
+            'af3': AFModule(c_in=c_feat),
+
+            'a2': AttentionBlock(c_feat),
+
+            'rb3': ResidualBlock(
+                in_ch=c_feat,
+                out_ch=c_feat),
+
+            'rbu3': ResidualBlock(
+                in_ch=c_feat,
+                out_ch=c_feat),
+
+            'rb4': ResidualBlock(
+                in_ch=c_feat,
+                out_ch=c_feat),
+
+            'af4': AFModule(c_in=c_feat),
+
+            'rbu4': ResidualBlockUpsample(
+                in_ch=c_feat,
+                out_ch=c_out,
+                upsample=2),
+        })
+
     def run_fn(self, module_key):
         def custom_forward(*inputs):
             if module_key[:2] == 'af':
@@ -185,4 +297,4 @@ class FeatureDecoderAF(nn.Module):
         return x
 
     def __str__(self):
-        return f'FeatureDecoderAF({self.c_in},{self.c_feat},{self.c_out})'
+        return f'FeatureDecoderAF({self.c_in},{self.c_feat},{self.c_out},{self.reduced})'
