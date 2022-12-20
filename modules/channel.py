@@ -47,13 +47,15 @@ class AWGN(nn.Module):
     def __call__(self, symbols, snr, *args, **kwargs):
         channel_aux = {}
         snr_val = self._get_snr(snr).to(symbols.device)
-        channel_aux['channel_snr'] = snr_val.item()
 
         noise_shape = [*symbols.shape, 2]
         Es = torch.mean(symbols.abs() ** 2)
         No = (Es / (10 ** (snr_val/10))) / 2
         awgn = torch.view_as_complex(torch.randn(noise_shape, device=symbols.device) * torch.sqrt(No))
         noisy = symbols + awgn
+
+        channel_aux['channel_snr'] = snr_val.item()
+        channel_aux['channel_noise_var'] = No.item()
         return noisy, channel_aux
 
     def __str__(self):

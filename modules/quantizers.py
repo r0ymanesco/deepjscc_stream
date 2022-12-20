@@ -1,3 +1,6 @@
+import ipdb
+import numpy as np
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -31,14 +34,17 @@ class SoftHardQuantize(nn.Module):
         match self.anneal:
             case 'linear':
                 return self._linear_annealing()
+            case 'none':
+                pass
             case _:
                 raise NotImplementedError
 
     def forward(self, x):
         if self.training:
             sigma = self._anneal()
+            sigma = sigma.to(x.device)
         else:
-            sigma = 1e10 * torch.ones(1, device=x.device)
+            sigma = np.inf * torch.ones(1, device=x.device)
 
         x = x.view(x.size(0), -1, self.embed_dim)
         flatten = x.view(-1, self.embed_dim)
@@ -67,6 +73,25 @@ class SoftHardQuantize(nn.Module):
                           'embed': self.embed.clone().detach(),
                           'likelihoods': likelihoods.clone().detach(),
                           'sigma': sigma.item()}
+
+    def soft_dequantize(self, codeword, quantized):
+        codeword = codeword.view(codeword.size(0), -1, self.embed_dim)
+        flatten = codeword.view(-1, self.embed_dim)
+
+        dist = (
+            flatten.pow(2).sum(1, keepdim=True)
+            - 2 * flatten @ self.embed
+            + self.embed.pow(2).sum(0, keepdim=True)
+        )
+
+        soft_assign = F.softmax(-5 * dist, dim=1)
+        soft_assign = torch.matmul(soft_assign, self.embed.transpose(0, 1))
+        soft_assign = soft_assign.view(*quantized.shape)
+        soft_dequantized = quantized + (soft_assign - quantized).detach()
+        return soft_dequantized
+
+    def __str__(self):
+        return f'SoftHard({self.embed_dim},{self.anneal},{self.sigma_start},{self.sigma_max})'
 
 
 class LearnedQuantize(nn.Module):
@@ -98,6 +123,8 @@ class LearnedQuantize(nn.Module):
         match self.anneal:
             case 'linear':
                 return self._linear_annealing()
+            case 'none':
+                pass
             case _:
                 raise NotImplementedError
 
@@ -105,7 +132,7 @@ class LearnedQuantize(nn.Module):
         if self.training:
             sigma = self._anneal()
         else:
-            sigma = 1e10 * torch.ones(1, device=x.device)
+            sigma = np.inf * torch.ones(1, device=x.device)
 
         sigma = self._anneal()
 
@@ -143,3 +170,6 @@ class LearnedQuantize(nn.Module):
                           'embed': self.embed.clone().detach(),
                           'likelihoods': likelihoods.clone().detach(),
                           'sigma': sigma.item()}
+
+    def __str__(self):
+        return f'LQ({self.embed_dim},{self.anneal},{self.sigma_start},{self.sigma_max})'

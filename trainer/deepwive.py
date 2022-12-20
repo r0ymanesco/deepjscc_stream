@@ -168,7 +168,7 @@ class DeepWiVe(BaseTrainer):
 
         demod_symbols = self.modem.demodulate(rx_symbols)
 
-        prediction = self.key_decoder(demod_symbols, batch_snr)
+        prediction = torch.sigmoid(self.key_decoder(demod_symbols, batch_snr))
         return prediction
 
     def _interp_encode(self, target, ref, batch_bandwidth, batch_snr):

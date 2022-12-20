@@ -55,7 +55,7 @@ def LLR_AWGN(symbols, noise_var, constellation, constellation_bin):
     llr_den = torch.matmul(LLR_mtrx.transpose(1, 0), llr_den)
 
     LLR_out = torch.log(llr_num / llr_den)
-    LLR_out = LLR_out.view(B, N, -1)
+    LLR_out = LLR_out.view(B, N, -1).clamp(-500, 500)
     return LLR_out
 
 
@@ -126,11 +126,17 @@ class QAM(nn.Module):
         self.modulator = SoftHardQuantize(mod_order, 2, constellation,
                                           commitment, anneal,
                                           sigma_start, sigma_max, sigma_period, sigma_scale)
-        self.constellation_bin = constellation_bin
+        self.register_buffer('constellation', constellation)
+        self.register_buffer('constellation_bin', constellation_bin)
 
-    def modulate(self, code):
-        real_modulated, mod_aux = self.modulator(code)
-        modulated = torch.view_as_complex(real_modulated)
+    def modulate(self, code, index=None):
+        if index is None:
+            real_modulated, mod_aux = self.modulator(code)
+            modulated = torch.view_as_complex(real_modulated)
+        else:
+            real_modulated = F.embedding(index, self.constellation.transpose(0, 1))
+            modulated = torch.view_as_complex(real_modulated)
+            mod_aux = {}
         return modulated, mod_aux
 
     def demodulate(self, symbols, channel_model=None, noise_var=0):
@@ -139,7 +145,8 @@ class QAM(nn.Module):
             match channel_model:
                 case 'awgn':
                     constellation = self.modulator.embed
-                    return LLR_AWGN(symbols, noise_var, constellation, self.constellation_bin)
+                    llr = LLR_AWGN(symbols.squeeze(1), noise_var, constellation.transpose(1, 0), self.constellation_bin)
+                    return llr.unsqueeze(1)
                 case _:
                     raise NotImplementedError
         else:

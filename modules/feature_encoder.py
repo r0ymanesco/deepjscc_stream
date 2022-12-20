@@ -122,11 +122,12 @@ class FeatureEncoder(nn.Module):
 
 
 class FeatureDecoder(nn.Module):
-    def __init__(self, c_in, c_feat, c_out, reduced):
+    def __init__(self, c_in, c_feat, c_out, feat_dims, reduced):
         super().__init__()
         self.c_in = c_in
         self.c_feat = c_feat
         self.c_out = c_out
+        self.feat_dims = feat_dims
         self.reduced = reduced
 
         self._get_arch(reduced)
@@ -223,6 +224,8 @@ class FeatureDecoder(nn.Module):
         )
 
     def forward(self, x):
+        B = x.size(0)
+        x = x.view((B, *self.feat_dims))
         return self.layers(x)
 
     def __str__(self):

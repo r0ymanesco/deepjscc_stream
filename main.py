@@ -58,6 +58,11 @@ def get_trainer(shell_params):
             parser = DeepJSCC_Q.get_parser(parser)
             params = parser.parse_args()
             trainer = DeepJSCC_Q(params.dataset.dataset, params.loss, params, params.resume)
+        case 'deepjscec':
+            from trainer.deepjscec import DeepJSCEC
+            parser = DeepJSCEC.get_parser(parser)
+            params = parser.parse_args()
+            trainer = DeepJSCEC(params.dataset.dataset, params.loss, params, params.resume)
         case _:
             raise NotImplementedError
 

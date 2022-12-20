@@ -213,8 +213,6 @@ class FeatureDecoderAF(nn.Module):
                 upsample=2),
 
             'af4': AFModule(c_in=c_out),
-
-            'sigmoid': nn.Sigmoid()
         })
 
     def _reduced_arch(self, c_in, c_feat, c_out):

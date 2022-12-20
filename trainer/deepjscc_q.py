@@ -142,7 +142,7 @@ class DeepJSCC_Q(BaseTrainer):
         }
 
         with tqdm(self.loader, unit='batch', bar_format='{l_bar}{bar:10}{r_bar}') as tepoch:
-            for batch_idx, (images, vid_fns) in enumerate(tepoch):
+            for batch_idx, (images, img_fns) in enumerate(tepoch):
                 pbar_desc = f'epoch: {self.epoch}, {self.mode}'
                 tepoch.set_description(pbar_desc)
 
@@ -163,7 +163,7 @@ class DeepJSCC_Q(BaseTrainer):
 
                 rx_symbols, _ = self.channel(symbols, [batch_snr.item()])
                 demod_symbols = self.modem.demodulate(rx_symbols)
-                prediction = self.decoder(demod_symbols, batch_snr)
+                prediction = torch.sigmoid(self.decoder(demod_symbols, batch_snr))
 
 
                 loss, batch_trackers = self._get_loss(prediction, images, batch_trackers)
