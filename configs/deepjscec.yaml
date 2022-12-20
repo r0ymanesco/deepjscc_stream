@@ -32,7 +32,7 @@ quantizer:
 cryptographer:
   pt_mod: 16
   ct_mod: 4093
-  err_k: 1.0
+  err_k: 8.87
 
 modem:
   mod_order: 4096
