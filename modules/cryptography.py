@@ -69,10 +69,10 @@ class LinearBFVEncryption(nn.Module):
         self.decryptor = modulo_mul(self.sk, ct1, self.ct_mod).transpose(1, 0).unsqueeze(0)
 
     def ct2bin(self, ct):
-        B, self.e_N, self.e_L = ct.size()
+        B, N, _ = ct.size()
         ct_bin = self.ct_dict.repeat_interleave(B, 0)
         ct_bin = ct_bin.gather(1, ct.view(B, -1, 1).repeat_interleave(self.n_ct_bits, 2).to(torch.int64))
-        coded = ct_bin.view(B, self.e_N, -1)
+        coded = ct_bin.view(B, N, -1)
         return coded
 
     def get_soft_ct(self, llr):
