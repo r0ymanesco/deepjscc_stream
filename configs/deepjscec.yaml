@@ -3,8 +3,8 @@ train_epochs: 600
 save_dir: 'checkpoints/deepjscec'
 
 dataset:
-  dataset: 'cifar10'
-  path: '/home/tt2114/datasets/CIFAR10'
+  dataset: 'tinyimagenet'
+  path: '/home/tt2114/datasets/tiny-imagenet-200'
   train_batch_size: 6
   eval_batch_size: 6
 

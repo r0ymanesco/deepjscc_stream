@@ -43,6 +43,14 @@ def get_dataloader(dataset, params):
             train_loader = CIFAR10(params.path, 'train')
             val_loader = CIFAR10(params.path, 'val')
             eval_loader = CIFAR10(params.path, 'eval')
+        case 'tinyimagenet':
+            from dataloaders.tinyimagenet import TinyImageNet
+            img_sizes, reduced_arch = TinyImageNet.get_config()
+            dataset_aux['img_sizes'] = img_sizes
+            dataset_aux['reduced_arch'] = reduced_arch
+            train_loader = TinyImageNet(params.path, 'train')
+            val_loader = TinyImageNet(params.path, 'val')
+            eval_loader = TinyImageNet(params.path, 'eval')
         case _:
             raise NotImplementedError
     return (train_loader, val_loader, eval_loader), dataset_aux
