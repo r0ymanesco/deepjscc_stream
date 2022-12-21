@@ -86,10 +86,7 @@ class VCTBandwidthAllocation(BaseTrainer):
 
         if len(params.comments) != 0: self.job_name += f'_Ref({params.comments})'
 
-        # self.job_name += 'R'
         if self.resume: self.load_weights()
-        # self.coding_stage = self.epoch
-        # self.predictor_stage = self.epoch + 1
 
     def _get_data(self, params):
         (train_loader, val_loader, eval_loader), dataset_aux = get_dataloader(params.dataset, params)
@@ -156,7 +153,6 @@ class VCTBandwidthAllocation(BaseTrainer):
             use_entropy=params.use_entropy
         ).to(self.device)
         self.job_name += '_' + str(encoder)
-        # self.job_name += '_' + str(encoder) + '_' + str(decoder)
         return encoder, decoder, predictor
 
     def _get_modem(self, params):
@@ -234,18 +230,7 @@ class VCTBandwidthAllocation(BaseTrainer):
                 tepoch.set_postfix(**epoch_postfix)
 
             loss_mean, return_aux = self._get_return_aux(epoch_trackers)
-
-            terminate = False
-            if self._validate:
-                terminate, save, update_scheduler = self._update_es(loss_mean)
-                if terminate:
-                    self.load_weights()
-                elif save:
-                    self.save_weights()
-                    print('Saving best weights')
-                elif update_scheduler:
-                    self.lr_scheduler.step()
-                    print('lr updated: {:.7f}'.format(self.lr_scheduler.get_last_lr()[0]))
+            terminate = self._update_es(loss_mean)
 
             self.reset()
         return loss_mean, terminate, return_aux
@@ -302,7 +287,7 @@ class VCTBandwidthAllocation(BaseTrainer):
                             'msssim_mean': msssim_mean,
                             'top_r_msssim_mean': top_rate_msssim_mean,
                         }
-                        self._update_loss_modulator(rate_loss_mean.unsqueeze(0))
+                        # self._update_loss_modulator(rate_loss_mean.unsqueeze(0))
 
                     elif self._evaluate:
                         return_aux = {
@@ -386,7 +371,10 @@ class VCTBandwidthAllocation(BaseTrainer):
                     epoch_postfix['msssim/top_r'] = '{:.5f}/{:.5f}'.format(batch_msssim_mean, top_rate_msssim_mean)
             case 'prediction':
                 epoch_trackers['loss_hist'].append(np.nanmean(batch_trackers['batch_loss']))
-                epoch_postfix[f'prediction loss'] = '{:.5f}'.format(epoch_trackers['loss_hist'][-1])
+                if self.use_entropy:
+                    epoch_postfix[f'rate loss'] = '{:.5f}'.format(epoch_trackers['loss_hist'][-1])
+                else:
+                    epoch_postfix[f'prediction loss'] = '{:.5f}'.format(epoch_trackers['loss_hist'][-1])
             case 'fine_tune':
                 epoch_trackers['loss_hist'].append(np.nanmean(batch_trackers['batch_loss']))
                 epoch_postfix[f'comp loss'] = '{:.5f}'.format(epoch_trackers['loss_hist'][-1])
@@ -429,7 +417,6 @@ class VCTBandwidthAllocation(BaseTrainer):
                     frame_psnr = calc_psnr(predicted_frames, target_frames)
                     batch_trackers['batch_psnr'].extend(frame_psnr)
                     batch_trackers['top_rate_psnr'].extend(calc_psnr([frame_at_rate[-1]], [target_frame]))
-                    # NOTE the top rate val is still affected by chosen ref frame
 
                     frame_msssim = calc_msssim(predicted_frames, target_frames)
                     batch_trackers['batch_msssim'].extend(frame_msssim)
@@ -458,8 +445,8 @@ class VCTBandwidthAllocation(BaseTrainer):
                     batch_trackers['top_rate_msssim'].extend(calc_msssim([frame_at_rate[-1]], [target_frame]))
             case 'prediction':
                 if self.use_entropy:
-                    likelihoods = encoder_aux['q_pred']
-                    loss = -torch.log2(likelihoods + 1e-6).sum(-1).mean()
+                    rate = encoder_aux['q_pred']
+                    loss = rate.mean()
                 else:
                     rate_dist_loss, _ = calc_loss(predictions, target, self.loss, 'batch')
                     q_pred = encoder_aux['q_pred']
@@ -468,13 +455,12 @@ class VCTBandwidthAllocation(BaseTrainer):
             case 'fine_tune':
                 rate_dist_loss, _ = calc_loss(predictions, target, self.loss, 'batch')
 
-                predicted_frames = [predictions]
+                predicted_frames = frame_at_rate
                 target_frames = [target_frame]
 
                 if self.use_entropy:
-                    likelihoods = encoder_aux['q_pred']
-                    likelihood_loss = -torch.log2(likelihoods).sum(-1).mean()
-                    loss = rate_dist_loss.mean() + self.fine_tune_loss_lmda * likelihood_loss
+                    rate = encoder_aux['q_pred']
+                    loss = rate_dist_loss.mean() + self.fine_tune_loss_lmda * rate.mean()
                 else:
                     q_pred = encoder_aux['q_pred']
                     pred_loss = F.l1_loss(q_pred, rate_dist_loss)
@@ -529,73 +515,113 @@ class VCTBandwidthAllocation(BaseTrainer):
         print(self.loss_weights)
 
     def _update_es(self, loss):
-        save_nets = False
-        update_scheduler = False
+        match self._validate:
+            case True:
+                flag, best_loss, best_epoch, bad_epochs = self.es.step(torch.Tensor([loss]), self.epoch)
+                if flag:
+                    match self.stage:
+                        case 'init':
+                            flag = False
+                            self.load_weights()
 
-        flag, best_loss, best_epoch, bad_epochs = self.es.step(torch.Tensor([loss]), self.epoch)
-        if flag:
-            match self.stage:
-                case 'init':
-                    flag = False
-                    self.load_weights()
+                            self.init_stage = self.epoch
+                            self.stage = 'coding'
+                            self.es.reset()
+                            print('Stage complete; loading best weights from epoch {}'.format(best_epoch))
+                        case 'coding':
+                            flag = False
+                            self.load_weights()
 
-                    self.init_stage = self.epoch
-                    self.stage = 'coding'
-                    self.es.reset()
-                case 'coding':
-                    flag = False
-                    self.load_weights()
+                            self.coding_stage = self.epoch
+                            self.stage = 'prediction'
+                            self.es.reset()
+                            print('Stage complete; loading best weights from epoch {}'.format(best_epoch))
+                        case 'prediction':
+                            flag = False
+                            self.load_weights()
 
-                    self.coding_stage = self.epoch
-                    self.stage = 'prediction'
-                    self.es.reset()
-                case 'prediction':
-                    flag = False
-                    self.load_weights()
-
-                    self.predictor_stage = self.epoch
-                    self.stage = 'fine_tune'
-                    self.es.reset()
-                case _:
-                    print('ES criterion met; loading best weights from epoch {}'.format(best_epoch))
-        else:
-            if bad_epochs == 0:
-                save_nets = True
-            elif self.scheduler_fn(bad_epochs):
-                update_scheduler = True
-            print('ES status: best: {:.6f}; bad epochs: {}/{}; best epoch: {}'
-                    .format(best_loss.item(), bad_epochs, self.es.patience, best_epoch))
-        return flag, save_nets, update_scheduler
+                            self.predictor_stage = self.epoch
+                            self.stage = 'fine_tune'
+                            self.es.reset()
+                            print('Stage complete; loading best weights from epoch {}'.format(best_epoch))
+                        case _:
+                            self.load_weights()
+                            print('Training complete; loading best weights from epoch {}'.format(best_epoch))
+                else:
+                    if bad_epochs == 0:
+                        self.save_weights()
+                    elif self.scheduler_fn(bad_epochs):
+                        self.lr_scheduler.step()
+                        print('lr updated: {:.7f}'.format(self.lr_scheduler.get_last_lr()[0]))
+                    print('ES status: best: {:.6f}; bad epochs: {}/{}; best epoch: {}'
+                        .format(best_loss.item(), bad_epochs, self.es.patience, best_epoch))
+            case _:
+                flag = False
+        return flag
 
     def _set_mode(self):
         match self.mode:
             case 'train':
                 self.epoch += 1
                 torch.set_grad_enabled(True)
+
                 self.encoder.train()
+                self.encoder.requires_grad_(True)
+
                 self.decoder.train()
+                self.decoder.requires_grad_(True)
+
                 self.predictor.train()
+                self.predictor.requires_grad_(True)
+
                 self.modem.train()
+                self.modem.requires_grad_(True)
+
                 self.channel.train()
+                self.channel.requires_grad_(True)
+
                 self.loader = self.train_loader
+                self._set_stage()
             case 'val':
                 torch.set_grad_enabled(False)
+
                 self.encoder.eval()
+                self.encoder.requires_grad_(False)
+
                 self.decoder.eval()
+                self.decoder.requires_grad_(False)
+
                 self.predictor.eval()
+                self.predictor.requires_grad_(False)
+
                 self.modem.eval()
+                self.modem.requires_grad_(False)
+
                 self.channel.eval()
+                self.channel.requires_grad_(False)
+
                 self.loader = self.val_loader
+                self._set_stage()
             case 'eval':
                 torch.set_grad_enabled(False)
-                self.encoder.eval()
-                self.decoder.eval()
-                self.predictor.eval()
-                self.modem.eval()
-                self.channel.eval()
-                self.loader = self.eval_loader
+                self.stage = 'fine_tune'
 
-        self._set_stage()
+                self.encoder.eval()
+                self.encoder.requires_grad_(False)
+
+                self.decoder.eval()
+                self.decoder.requires_grad_(False)
+
+                self.predictor.eval()
+                self.predictor.requires_grad_(False)
+
+                self.modem.eval()
+                self.modem.requires_grad_(False)
+
+                self.channel.eval()
+                self.channel.requires_grad_(False)
+
+                self.loader = self.eval_loader
 
     def _set_stage(self):
         if self.epoch <= self.init_stage:
@@ -609,6 +635,7 @@ class VCTBandwidthAllocation(BaseTrainer):
             self.stage = 'coding'
             self.optimizer = self.coding_optimizer
             self.lr_scheduler = self.coding_scheduler
+            if self.epoch == self.init_stage+1: self.es.reset()
 
             self.predictor.eval()
             self.predictor.requires_grad_(False)
@@ -736,6 +763,7 @@ class VCTBandwidthAllocation(BaseTrainer):
         parser.add_argument('--channel.model', type=str, help='channel: model to use')
         parser.add_argument('--channel.train_snr', type=list, help='channel: training snr(s)')
         parser.add_argument('--channel.eval_snr', type=list, help='channel: evaluate snr')
+        parser.add_argument('--channel.test_snr', type=list, help='channel: test snr(s)')
 
         parser.add_argument('--early_stop.mode', type=str, help='early_stop: min/max mode')
         parser.add_argument('--early_stop.delta', type=float, help='early_stop: improvement quantity')
