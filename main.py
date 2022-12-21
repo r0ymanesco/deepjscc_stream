@@ -112,13 +112,13 @@ if __name__ == '__main__':
     # TODO separate eval loop from main
     for snr in test_snrs:
         trainer.evaluate()
-        _, _, eval_aux = trainer(snr)
+        _, _, eval_aux = trainer([snr])
 
         if writer is None:
             writer = SummaryWriter()
 
         for data_key in eval_aux:
             writer.add_scalars(f'Evaluate/{data_key}',
-                               {f'{str(trainer)}': eval_aux[data_key]}, snr[0])
+                               {f'{str(trainer)}': eval_aux[data_key]}, snr)
 
     writer.close()
