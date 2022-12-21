@@ -364,6 +364,7 @@ class DeepJSCC_Q(BaseTrainer):
         parser.add_argument('--channel.model', type=str, help='channel: model to use')
         parser.add_argument('--channel.train_snr', type=list, help='channel: training snr(s)')
         parser.add_argument('--channel.eval_snr', type=list, help='channel: evaluate snr')
+        parser.add_argument('--channel.test_snr', type=list, help='channel: test snr(s)')
 
         parser.add_argument('--early_stop.mode', type=str, help='early_stop: min/max mode')
         parser.add_argument('--early_stop.delta', type=float, help='early_stop: improvement quantity')
