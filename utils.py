@@ -40,6 +40,7 @@ def get_dataloader(dataset, params):
             img_sizes, reduced_arch = CIFAR10.get_config()
             dataset_aux['img_sizes'] = img_sizes
             dataset_aux['reduced_arch'] = reduced_arch
+            dataset_aux['classes'] = 10
             train_loader = CIFAR10(params.path, 'train')
             val_loader = CIFAR10(params.path, 'val')
             eval_loader = CIFAR10(params.path, 'eval')
@@ -48,6 +49,7 @@ def get_dataloader(dataset, params):
             img_sizes, reduced_arch = TinyImageNet.get_config()
             dataset_aux['img_sizes'] = img_sizes
             dataset_aux['reduced_arch'] = reduced_arch
+            dataset_aux['classes'] = 200
             train_loader = TinyImageNet(params.path, 'train')
             val_loader = TinyImageNet(params.path, 'val')
             eval_loader = TinyImageNet(params.path, 'eval')
@@ -178,6 +180,8 @@ def calc_loss(prediction, target, loss, reduction='mean'):
                             data_range=1, size_average=avg)
             if not avg:
                 loss = loss.view(-1, shape[1])
+        case 'ce':
+            loss = F.cross_entropy(prediction, target)
         case _:
             raise NotImplementedError
     return loss, loss_aux

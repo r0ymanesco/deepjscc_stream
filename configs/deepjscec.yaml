@@ -1,10 +1,11 @@
-loss: 'l2'
+loss: 'ce'
+topk: 1
 train_epochs: 600
 save_dir: 'checkpoints/deepjscec'
 
 dataset:
-  dataset: 'tinyimagenet'
-  path: '/home/tt2114/datasets/tiny-imagenet-200'
+  dataset: 'cifar10'
+  path: '/home/tt2114/datasets/CIFAR10'
   train_batch_size: 6
   eval_batch_size: 6
 
@@ -32,7 +33,7 @@ quantizer:
 cryptographer:
   pt_mod: 16
   ct_mod: 4093
-  err_k: 8.87
+  err_k: 1.0
 
 modem:
   mod_order: 4096

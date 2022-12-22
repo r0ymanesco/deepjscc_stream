@@ -7,6 +7,7 @@ from collections import OrderedDict
 
 import torch
 import torch.utils.data as data
+import torch.nn.functional as F
 
 from trainer.base_trainer import BaseTrainer
 
@@ -14,6 +15,7 @@ from modules.modem import Modem
 from modules.channel import Channel
 from modules.scheduler import EarlyStopping
 from modules.feature_encoder import FeatureEncoder, FeatureDecoder
+from modules.deepjscec.categorical_encoder import CategoricalEncoder, CategoricalDecoder
 from modules.quantizers import SoftHardQuantize
 from modules.cryptography import LinearBFVEncryption
 
@@ -34,6 +36,12 @@ class DeepJSCEC(BaseTrainer):
     def _get_config(self, params):
         self.job_name = f'{self.trainer}({self.loss})'
 
+        if self.loss == 'ce':
+            self.categorical = True
+            self.topk = params.topk
+        else:
+            self.categorical = False
+
         (self.train_loader,
          self.val_loader,
          self.eval_loader), dataset_aux = self._get_data(params.dataset)
@@ -45,7 +53,7 @@ class DeepJSCEC(BaseTrainer):
         else:
             self.sim_metric = 'msssim'
 
-        self.encoder, self.decoder = self._get_encoder(params.encoder, self.frame_dims, self.reduced_arch)
+        self.encoder, self.decoder = self._get_encoder(params.encoder, self.frame_dims, self.reduced_arch, dataset_aux['classes'])
 
         self.quantizer = self._get_quantizer(params.quantizer)
 
@@ -97,25 +105,41 @@ class DeepJSCEC(BaseTrainer):
         )
         return (train_loader, val_loader, eval_loader), dataset_aux
 
-    def _get_encoder(self, params, img_sizes, reduced):
+    def _get_encoder(self, params, img_sizes, reduced, classes):
         if reduced:
             self.feat_dims = (params.c_out, *[dim // 4 for dim in img_sizes[1:]])
         else:
             self.feat_dims = (params.c_out, *[dim // 16 for dim in img_sizes[1:]])
 
-        encoder = FeatureEncoder(
-            c_in=params.c_in,
-            c_feat=params.c_feat,
-            c_out=params.c_out,
-            reduced=reduced,
-        ).to(self.device)
-        decoder = FeatureDecoder(
-            c_in=params.c_out,
-            c_feat=params.c_feat,
-            c_out=params.c_in,
-            feat_dims=self.feat_dims,
-            reduced=reduced
-        ).to(self.device)
+        if self.categorical:
+            encoder = CategoricalEncoder(
+                c_in=params.c_in,
+                c_feat=params.c_feat,
+                c_out=params.c_out,
+                reduced=reduced,
+                classes=classes
+            ).to(self.device)
+            decoder = CategoricalDecoder(
+                c_out=params.c_out,
+                c_feat=params.c_feat,
+                feat_dims=self.feat_dims,
+                reduced=reduced,
+                classes=classes
+            ).to(self.device)
+        else:
+            encoder = FeatureEncoder(
+                c_in=params.c_in,
+                c_feat=params.c_feat,
+                c_out=params.c_out,
+                reduced=reduced,
+            ).to(self.device)
+            decoder = FeatureDecoder(
+                c_in=params.c_out,
+                c_feat=params.c_feat,
+                c_out=params.c_in,
+                feat_dims=self.feat_dims,
+                reduced=reduced
+            ).to(self.device)
         self.job_name += '_' + str(encoder)
         return encoder ,decoder
 
@@ -166,23 +190,35 @@ class DeepJSCEC(BaseTrainer):
         self.check_mode_set()
 
         terminate = False
-        epoch_trackers = {
-            'loss_hist': [],
-            'psnr_hist': [],
-            f'{self.sim_metric}_hist': [],
-        }
+        if self.categorical:
+            epoch_trackers = {
+                'loss_hist': [],
+                'acc_hist': [],
+            }
+        else:
+            epoch_trackers = {
+                'loss_hist': [],
+                'psnr_hist': [],
+                f'{self.sim_metric}_hist': [],
+            }
 
         with tqdm(self.loader, unit='batch', bar_format='{l_bar}{bar:10}{r_bar}') as tepoch:
-            for batch_idx, (images, img_fns) in enumerate(tepoch):
+            for batch_idx, (images, labels) in enumerate(tepoch):
                 pbar_desc = f'epoch: {self.epoch}, {self.mode}'
                 tepoch.set_description(pbar_desc)
 
                 epoch_postfix = OrderedDict()
-                batch_trackers = {
-                    'batch_loss': [],
-                    'batch_psnr': [],
-                    f'batch_{self.sim_metric}': [],
-                }
+                if self.categorical:
+                    batch_trackers = {
+                        'batch_loss': [],
+                        'batch_acc': [],
+                    }
+                else:
+                    batch_trackers = {
+                        'batch_loss': [],
+                        'batch_psnr': [],
+                        f'batch_{self.sim_metric}': [],
+                    }
 
                 epoch_postfix['snr'] = '{:.2f}'.format(snr[0])
 
@@ -200,9 +236,15 @@ class DeepJSCEC(BaseTrainer):
                 demod_symbols = self.modem.demodulate(rx_symbols, channel_model='awgn', noise_var=noise_var)
                 decrypted_msg = self.cryptographer.decrypt(demod_symbols)
                 dequantized = self.quantizer.soft_dequantize(decrypted_msg.view(*quantized.shape), quantized)
-                prediction = torch.sigmoid(self.decoder(dequantized))
 
-                loss, batch_trackers = self._get_loss(prediction, images, batch_trackers)
+                if self.categorical:
+                    prediction = self.decoder(dequantized)
+                    target = labels.to(self.device)
+                else:
+                    prediction = torch.sigmoid(self.decoder(dequantized))
+                    target = images
+
+                loss, batch_trackers = self._get_loss(prediction, target, batch_trackers)
                 if self._training: self._update_params(loss)
 
                 epoch_trackers, epoch_postfix = self._update_epoch_postfix(batch_trackers,
@@ -220,54 +262,73 @@ class DeepJSCEC(BaseTrainer):
         return_aux = {}
         loss_mean = np.nanmean(epoch_trackers['loss_hist'])
 
-        if not self._training:
-            psnr_mean = np.nanmean(epoch_trackers['psnr_hist'])
-            sim_mean = np.nanmean(epoch_trackers[f'{self.sim_metric}_hist'])
-
-            if self._validate:
+        match (self._validate, self._evaluate, self.categorical):
+            case (True, False, False):
+                psnr_mean = np.nanmean(epoch_trackers['psnr_hist'])
+                sim_mean = np.nanmean(epoch_trackers[f'{self.sim_metric}_hist'])
                 return_aux['psnr_mean'] = psnr_mean
                 return_aux[f'{self.sim_metric}_mean'] = sim_mean
-
-            elif self._evaluate:
+            case (False, True, False):
+                psnr_mean = np.nanmean(epoch_trackers['psnr_hist'])
+                sim_mean = np.nanmean(epoch_trackers[f'{self.sim_metric}_hist'])
                 psnr_std = np.sqrt(np.var(epoch_trackers['psnr_hist']))
                 sim_std = np.sqrt(np.var(epoch_trackers[f'{self.sim_metric}_hist']))
-
                 return_aux['psnr_mean'] = psnr_mean
                 return_aux['psnr_std'] = psnr_std
                 return_aux[f'{self.sim_metric}_mean'] = sim_mean
                 return_aux[f'{self.sim_metric}_std'] = sim_std
+            case (True, False, True):
+                acc_mean = np.nanmean(epoch_trackers['acc_hist'])
+                return_aux['acc_mean'] = acc_mean
+            case (False, True, True):
+                acc_mean = np.nanmean(epoch_trackers['acc_hist'])
+                acc_std = np.sqrt(np.var(epoch_trackers['acc_hist']))
+                return_aux['acc_mean'] = acc_mean
+                return_aux['acc_std'] = acc_std
         return loss_mean, return_aux
 
     def _update_epoch_postfix(self, batch_trackers, epoch_trackers, epoch_postfix):
         epoch_trackers['loss_hist'].append(np.nanmean(batch_trackers['batch_loss']))
         epoch_postfix[f'{self.loss} loss'] = '{:.5f}'.format(epoch_trackers['loss_hist'][-1])
 
-        if not self._training:
-            epoch_trackers['psnr_hist'].extend(batch_trackers['batch_psnr'])
-            batch_psnr_mean = np.nanmean(batch_trackers['batch_psnr'])
-            epoch_postfix['psnr'] = '{:.5f}'.format(batch_psnr_mean)
+        match (self._training, self.categorical):
+            case (False, False):
+                epoch_trackers['psnr_hist'].extend(batch_trackers['batch_psnr'])
+                batch_psnr_mean = np.nanmean(batch_trackers['batch_psnr'])
+                epoch_postfix['psnr'] = '{:.5f}'.format(batch_psnr_mean)
 
-            epoch_trackers[f'{self.sim_metric}_hist'].extend(batch_trackers[f'batch_{self.sim_metric}'])
-            batch_sim_mean = np.nanmean(batch_trackers[f'batch_{self.sim_metric}'])
-            epoch_postfix[f'{self.sim_metric}'] = '{:.5f}'.format(batch_sim_mean)
+                epoch_trackers[f'{self.sim_metric}_hist'].extend(batch_trackers[f'batch_{self.sim_metric}'])
+                batch_sim_mean = np.nanmean(batch_trackers[f'batch_{self.sim_metric}'])
+                epoch_postfix[f'{self.sim_metric}'] = '{:.5f}'.format(batch_sim_mean)
+            case (False, True):
+                epoch_trackers['acc_hist'].extend(batch_trackers['batch_acc'])
+                batch_acc_mean = np.nanmean(batch_trackers['batch_acc'])
+                epoch_postfix['acc'] = '{:.5f}'.format(batch_acc_mean)
         return epoch_trackers, epoch_postfix
 
     def _get_loss(self, predicted, target, batch_trackers):
         loss, _ = calc_loss(predicted, target, self.loss)
         batch_trackers['batch_loss'].append(loss.item())
 
-        if not self._training:
-            img_psnr = calc_psnr([predicted], [target])
-            batch_trackers['batch_psnr'].extend(img_psnr)
+        match (self._training, self.categorical):
+            case (False, False):
+                img_psnr = calc_psnr([predicted], [target])
+                batch_trackers['batch_psnr'].extend(img_psnr)
 
-            match self.sim_metric:
-                case 'ssim':
-                    img_sim = calc_ssim([predicted], [target])
-                case 'msssim':
-                    img_sim = calc_msssim([predicted], [target])
-                case _:
-                    raise ValueError
-            batch_trackers[f'batch_{self.sim_metric}'].extend(img_sim)
+                match self.sim_metric:
+                    case 'ssim':
+                        img_sim = calc_ssim([predicted], [target])
+                    case 'msssim':
+                        img_sim = calc_msssim([predicted], [target])
+                    case _:
+                        raise ValueError
+                batch_trackers[f'batch_{self.sim_metric}'].extend(img_sim)
+            case (False, True):
+                B = predicted.size(0)
+                predicted_classes = torch.topk(F.log_softmax(predicted, dim=-1), self.topk, dim=-1)[1]
+                accuracy = torch.any(torch.eq(predicted_classes, target.view(B, -1)), dim=-1).to(torch.int)
+                accuracy = accuracy.sum() / torch.numel(accuracy)
+                batch_trackers['batch_acc'].append(accuracy.item())
         return loss, batch_trackers
 
     def _update_es(self, loss):
@@ -390,6 +451,7 @@ class DeepJSCEC(BaseTrainer):
     @staticmethod
     def get_parser(parser):
         parser.add_argument('--save_dir', type=str, help='directory to save checkpoints')
+        parser.add_argument('--topk', type=int, default=1, help='number of classes (for categorical training)')
 
         parser.add_argument('--dataset.dataset', type=str, help='dataset: dataset to use')
         parser.add_argument('--dataset.path', type=str, help='dataset: path to dataset')
