@@ -1,4 +1,4 @@
-loss: 'ce'
+loss: 'l2'
 topk: 1
 train_epochs: 600
 save_dir: 'checkpoints/deepjscec'

@@ -35,10 +35,10 @@ class LinearBFVEncryption(nn.Module):
     def _noise_gen(self, size):
         u = (torch.randn((self.n1, 1), device=self.device) * self.err_k).round()
         e2 = (torch.randn((self.n2, 1), device=self.device) * self.err_k).round()
-        e1 = (torch.randn((size, 1), device=self.device).cuda() * self.err_k).round()
+        e1 = (torch.randn((size, 1), device=self.device) * self.err_k).round()
         return u, e1, e2
 
-    def _keygen(self, size, modulus):
+    def _keygen(self, msg_len, modulus):
         """Generate a public and secret keys.
         Args:
             size: size of the vectors for the public and secret keys.
@@ -46,9 +46,9 @@ class LinearBFVEncryption(nn.Module):
         Returns:
             Public and secret key.
         """
-        e = (torch.randn(size, self.n1).cuda() * self.err_k).round()
+        e = (torch.randn(msg_len, self.n1, device=self.device) * self.err_k).round()
 
-        sk = (torch.randn(size, self.n2).cuda() * self.err_k).round()
+        sk = (torch.randn(msg_len, self.n2, device=self.device) * self.err_k).round()
         a = torch.randint(0, modulus, size=(self.n2, self.n1), device=self.device, dtype=torch.float)
         b = modulo_add(
             modulo_mul(sk, a, modulus), e, modulus)
